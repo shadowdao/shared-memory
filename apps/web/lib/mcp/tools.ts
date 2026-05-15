@@ -68,7 +68,7 @@ async function resolveProjectId(
 const projectIdentify: ToolDef = {
   name: "project.identify",
   description:
-    "Register or look up a project for this user by its stable key. Returns the project's internal ID and display name. Call once per session before writing project-scoped memories.",
+    "Call ONCE near the start of every session that has a project context — a repo you're working in, a service you're debugging, etc. — to register or look up that project so subsequent project-scoped memories attach correctly. Use a stable `key` you can reproduce next session (repo name, repo URL, or working directory basename). Skip if the work is purely scratch / not tied to a specific codebase.",
   inputSchema: {
     type: "object",
     properties: {
@@ -117,7 +117,7 @@ const projectIdentify: ToolDef = {
 const memoryWrite: ToolDef = {
   name: "memory.write",
   description:
-    "Persist a memory for this user. With scope='project' (default), the memory is attached to the named project. With scope='user', it's a user-global memory shared across all projects.",
+    "Save a durable fact, preference, or decision that ANY future Claude Code session on ANY of this user's machines should know. Call this when the user shares something that meets ALL of: (1) likely to matter beyond this conversation, (2) not derivable from reading current code/git, (3) would surprise a future you if forgotten. Examples: 'I use HAProxy at home' (user-scope), 'we chose Drizzle over Prisma because of bundle size' (project-scope), 'our prod DB is at db.example.com' (user-scope reference). Use scope='user' for facts about the human or their infra; scope='project' for facts tied to a specific codebase (always preceded by project.identify). DO NOT use for: transient task state, this-session-only scratch notes, or container-specific facts (those belong in the built-in file-based memory at ~/.claude/.../memory/). Tags help retrieval.",
   inputSchema: {
     type: "object",
     properties: {
@@ -188,7 +188,7 @@ const memoryWrite: ToolDef = {
 const memoryList: ToolDef = {
   name: "memory.list",
   description:
-    "List memories for this user, most recent first. Filter by project key and/or scope. Phase 2 will add memory.search for semantic + full-text lookup.",
+    "Browse memories chronologically — useful at session start to load all relevant project context when there's no specific search query. Prefer memory.search when you have a specific question to answer; use list when you just want recent context. Filter by project, scope, or tags. Limit defaults to 50.",
   inputSchema: {
     type: "object",
     properties: {
@@ -241,7 +241,8 @@ const memoryList: ToolDef = {
 
 const memoryGet: ToolDef = {
   name: "memory.get",
-  description: "Fetch a single memory by its UUID.",
+  description:
+    "Fetch the full content of a single memory by its UUID. Use after memory.search or memory.list when you need the full body — list/search return summaries.",
   inputSchema: {
     type: "object",
     properties: { id: { type: "string", format: "uuid" } },
@@ -270,7 +271,8 @@ const memoryGet: ToolDef = {
 
 const memoryDelete: ToolDef = {
   name: "memory.delete",
-  description: "Soft-delete a memory (sets deleted_at; preserved for audit).",
+  description:
+    "Soft-delete a memory when it becomes stale or wrong — e.g., the user changes a preference, or a fact you saved turns out to be incorrect. ALWAYS prefer memory.update over delete-then-write for content corrections; only delete when the memory genuinely shouldn't exist anymore. Soft delete preserves the audit trail.",
   inputSchema: {
     type: "object",
     properties: { id: { type: "string", format: "uuid" } },
@@ -309,7 +311,7 @@ const memoryDelete: ToolDef = {
 const memoryUpdate: ToolDef = {
   name: "memory.update",
   description:
-    "Edit an existing memory. Provide id and any of content or tags. If content changes, the embedding is re-computed automatically. Useful for fixing a typo without re-creating the row.",
+    "Edit an existing memory in place — for correcting a stored fact, expanding it with new detail, or adjusting tags. Preserves the memory's id (so callers referencing it don't break) and re-embeds automatically when content changes. Use this — not delete + write — whenever you're refining what's already there.",
   inputSchema: {
     type: "object",
     properties: {
@@ -367,7 +369,7 @@ const memoryUpdate: ToolDef = {
 const memorySearch: ToolDef = {
   name: "memory.search",
   description:
-    "Hybrid search across this user's memories. Combines three signals — vector similarity (semantic), Postgres full-text rank (keyword), and tag overlap — via reciprocal rank fusion. Returns top results with per-source ranks visible so the model can judge confidence.",
+    "Search this user's stored memories BEFORE answering any question that might depend on something they told you in a past conversation — their preferences, infrastructure choices, project decisions, references, ongoing initiatives. Also call at the start of work on a known project to load semantic context. The query should be the topic you're looking up in natural language — don't pre-keyword it. Combines vector similarity, Postgres full-text, and tag overlap via RRF; each result carries per-source rank so you can tell whether the hit is a strong semantic match or a weak vector-only one. Cheap; lean toward calling it.",
   inputSchema: {
     type: "object",
     properties: {
