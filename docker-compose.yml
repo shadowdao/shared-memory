@@ -92,6 +92,7 @@ services:
       EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
 
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?required}
+      CLI_TOKEN_SECRET: ${CLI_TOKEN_SECRET:?required}
     ports:
       # Exposed to the host so an external reverse proxy (HAProxy, nginx,
       # etc.) can reach the app. When using the `tls` profile, Caddy also
