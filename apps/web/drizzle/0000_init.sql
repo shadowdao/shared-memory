@@ -84,9 +84,9 @@ CREATE INDEX "memories_created_idx" ON "memories" ("created_at" DESC);
 -- GIN index for full-text search over the generated tsvector column.
 CREATE INDEX "memories_content_tsv_idx" ON "memories" USING GIN ("content_tsv");
 
--- GIN index on tags for exact-tag filtering, and trigram index for fuzzy matching.
-CREATE INDEX "memories_tags_idx"      ON "memories" USING GIN ("tags");
-CREATE INDEX "memories_tags_trgm_idx" ON "memories" USING GIN ("tags" gin_trgm_ops);
+-- GIN index on tags for tag-set containment queries (`tags @> ARRAY[...]`).
+-- pg_trgm is loaded for future fuzzy text search on `content`, not tags.
+CREATE INDEX "memories_tags_idx" ON "memories" USING GIN ("tags");
 
 -- IVFFlat vector index. Lists=100 is a reasonable starting point; tune later
 -- once we have real volume. Note: the index requires data to be useful — it's
