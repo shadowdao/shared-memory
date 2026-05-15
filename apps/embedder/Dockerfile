@@ -5,7 +5,9 @@
 # Builds from the repo root: docker build -f apps/embedder/Dockerfile .
 # -----------------------------------------------------------------------------
 
-FROM node:20-alpine AS base
+# node:20-slim instead of -alpine — onnxruntime-node ships glibc-linked
+# binaries and crashes at dlopen time on musl.
+FROM node:20-slim AS base
 RUN corepack enable
 WORKDIR /app
 
@@ -36,16 +38,18 @@ RUN cd apps/embedder \
 RUN pnpm --filter @shared-memory/embedder deploy --prod /deploy
 
 # ---------- runner ----------
-FROM node:20-alpine AS runner
+FROM node:20-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production \
     PORT=8080 \
     HOST=0.0.0.0 \
     MODEL_CACHE_DIR=/data/models
 
-RUN apk add --no-cache wget \
- && addgroup --system --gid 1001 nodejs \
- && adduser  --system --uid 1001 --ingroup nodejs node-embedder \
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends wget ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system --gid 1001 nodejs \
+ && useradd  --system --uid 1001 --gid nodejs --no-create-home node-embedder \
  && mkdir -p /data/models \
  && chown -R node-embedder:nodejs /data
 
