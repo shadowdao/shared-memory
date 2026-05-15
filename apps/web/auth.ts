@@ -21,8 +21,9 @@ export const { auth, handlers, signIn, signOut } = NextAuth({
   ],
   secret: env().NEXTAUTH_SECRET,
   session: { strategy: "jwt" },
-  // Sign-in page is the default Auth.js form; can be customized later.
-  pages: { signIn: "/api/auth/signin" },
+  // No custom `pages.signIn`: Auth.js serves its default provider-picker UI
+  // at /api/auth/signin. Setting it to that exact path causes a redirect
+  // loop because Auth.js redirects to the configured page → which is itself.
   callbacks: {
     async jwt({ token, account, profile }) {
       // On first call after sign-in, `account` + `profile` are populated.
