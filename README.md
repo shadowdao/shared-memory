@@ -1,42 +1,53 @@
 # shared-memory
 
 A self-hosted MCP server that gives Claude Code sessions a **shared, persistent
-memory** plus a **reusable snippet library**, behind your own Authentik OIDC
-login. Includes a Web UI for reviewing, editing, and deleting what's been
-stored.
+memory** plus a **reusable snippet library**, behind your own OIDC login.
+Includes a Web UI for reviewing, editing, and deleting what's been stored.
 
-> **Status:** Phase 1 — core memory path end-to-end (write / list / get /
-> delete), Authentik-authed Web UI, MCP endpoint with Authentik JWT validation.
-> Semantic search and the rich Web UI land in Phase 2 / Phase 3.
+Works with any OIDC-compliant identity provider — Authentik (the worked
+example below), Microsoft Entra ID, Keycloak, Okta, Auth0, Zitadel, Google
+Workspace. Anything that publishes a `/.well-known/openid-configuration`.
+
+> **Status:** Phase 2 — memory with hybrid (vector + FTS + tags) search,
+> OIDC-authed Web UI, MCP endpoint with JWKS-validated bearer tokens.
+> Rich Web UI lands in Phase 3.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────┐        ┌───────────────────────┐        ┌──────────────┐
-│  Claude Code    │──MCP──▶│  shared-memory app    │◀──OIDC─│   Authentik  │
-│  (many sessions)│  HTTP  │  Next.js + MCP route  │        └──────────────┘
-└─────────────────┘        │  + Web UI             │              ▲
-                           └───────────┬───────────┘              │
-                                       │                          │
+┌─────────────────┐        ┌───────────────────────┐        ┌─────────────────┐
+│  Claude Code    │──MCP──▶│  shared-memory app    │◀──OIDC─│  Your OIDC IdP  │
+│  (many sessions)│  HTTP  │  Next.js + MCP route  │        │  (Authentik /   │
+└─────────────────┘        │  + Web UI             │        │   EntraID /     │
+                           └───────────┬───────────┘        │   Keycloak/...) │
+                                       │                    └─────────────────┘
+                                       │                          ▲
                                 ┌──────▼──────┐         user logs in
                                 │ Postgres 16 │         via web browser
                                 │  + pgvector │
                                 └─────────────┘
+                                       ▲
+                                 ┌─────┴─────┐
+                                 │ embedder  │  (bge-small via Xenova
+                                 │ sidecar   │   transformers, on-CPU)
+                                 └───────────┘
 ```
 
 The same container serves both the MCP endpoint (under `/api/mcp`) and the
-Web UI. Users authenticate via your Authentik instance — pre-registered
-confidential clients, not dynamic client registration. Identity is keyed on
-the OIDC `sub` claim so memories are scoped per user.
+Web UI. Users authenticate via your OIDC provider with pre-registered
+confidential clients. Identity is keyed on the OIDC `sub` + `iss` so
+memories are scoped per user.
 
 ---
 
 ## Prerequisites
 
 - A host with **Docker** and **Docker Compose v2** installed.
-- A **self-hosted Authentik instance** you administer.
+- An **OIDC identity provider** you control (Authentik, EntraID, Keycloak,
+  Okta, Auth0, Zitadel, …). The setup walkthrough below uses Authentik
+  because that's what we run; other IdPs need equivalent settings.
 - A **public DNS record** for the chosen hostname pointing at your reverse
   proxy (HAProxy, nginx, Cloudflare Tunnel, …) or at this host directly.
 - A Postgres-friendly disk for the `db_data` volume.
@@ -80,7 +91,7 @@ app on the internal Docker network.
 git clone https://repo.anhonesthost.net/jknapp/shared-memory.git
 cd shared-memory
 cp .env.example .env
-# edit .env — see "Configuration" and "Authentik setup" below
+# edit .env — see "Configuration" and "OIDC provider setup" below
 docker compose build
 docker compose up -d                # Mode A (behind external proxy)
 # OR
@@ -91,7 +102,7 @@ docker compose logs -f migrator app
 ```
 
 When `app` reports `Listening on http://0.0.0.0:3000`, visit your
-`PUBLIC_URL` and click **Sign in with Authentik**. You should land on
+`PUBLIC_URL` and click **Sign in with OIDC**. You should land on
 `/me` showing your OIDC session.
 
 ---
@@ -108,10 +119,10 @@ Copy `.env.example` and fill in the values below.
 | `APP_BIND` | A | Interface to bind on. Use `127.0.0.1` to only accept traffic from a proxy on the same host. Default `0.0.0.0`. |
 | `APP_HOSTNAME` | B | Hostname only (no scheme). Caddy uses it for the TLS site block. |
 | `ACME_EMAIL` | B | Email for Let's Encrypt registration. |
-| `OIDC_ISSUER` | both | Authentik's OIDC issuer URL for **this app**. Looks like `https://auth.example.com/application/o/shared-memory/`. |
-| `OIDC_CLIENT_ID_WEB` | both | Client ID of the Web-UI Authentik provider. |
-| `OIDC_CLIENT_SECRET_WEB` | both | Client secret of the Web-UI Authentik provider. |
-| `OIDC_CLIENT_ID_MCP` | both | Client ID of the MCP resource-server Authentik provider. |
+| `OIDC_ISSUER` | both | OIDC issuer URL for **this app**. Authentik uses `https://auth.example.com/application/o/<slug>/`; other IdPs vary. |
+| `OIDC_CLIENT_ID_WEB` | both | Client ID of the Web-UI OAuth/OIDC client in your IdP. |
+| `OIDC_CLIENT_SECRET_WEB` | both | Client secret of the Web-UI client. |
+| `OIDC_CLIENT_ID_MCP` | both | Client ID of the MCP resource-server client in your IdP. |
 | `OIDC_AUDIENCE` | both | Audience string the MCP access token must carry in its `aud` claim. Recommended: `shared-memory`. |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | both | Local Postgres credentials. |
 | `NEXTAUTH_SECRET` | both | Session-cookie signing key. Generate with `openssl rand -base64 32`. |
@@ -122,13 +133,26 @@ Mode column: **A** = external proxy (default), **B** = built-in Caddy TLS.
 
 ---
 
-## Authentik setup
+## OIDC provider setup
 
-You need **two** Authentik OAuth2/OpenID Connect providers + applications:
-one for the Web UI (browser logins), one for the MCP resource server (the
-audience Claude Code's access tokens are minted for). Reusing one provider
-for both works, but the dual-provider setup keeps audiences cleanly separated
-and is what the rest of this doc assumes.
+You need **two** OAuth2 / OIDC clients on your identity provider:
+
+- **Web UI client** — confidential, used when a human signs in through the
+  browser to the Web UI
+- **MCP resource-server client** — public (PKCE), used by Claude Code or any
+  other MCP client to obtain access tokens scoped to the MCP endpoint
+
+Reusing one client for both works, but the two-client setup keeps token
+audiences cleanly separated and matches the rest of this doc.
+
+The walkthrough below uses **Authentik** because that's what we run. The
+shape is the same on any OIDC provider; the UI labels differ:
+
+| Concept here | Authentik | Microsoft Entra ID | Keycloak |
+|---|---|---|---|
+| OAuth2 client | Provider + Application | App registration | Client |
+| Redirect URI list | Provider's "Redirect URIs / Origins" | App's "Redirect URIs" | Client's "Valid Redirect URIs" |
+| Audience claim | Scope mapping or property mapping | "Expose an API" + scope | Client scope with audience mapper |
 
 ### A. Web UI provider
 
@@ -142,7 +166,7 @@ and is what the rest of this doc assumes.
 - **Client Secret:** auto-generated → copy to `.env` as `OIDC_CLIENT_SECRET_WEB`
 - **Redirect URIs / Origins:**
   ```
-  https://memory.dnspegasus.net/api/auth/callback/authentik
+  https://memory.dnspegasus.net/api/auth/callback/oidc
   ```
   (replace with your `PUBLIC_URL`)
 - **Signing Key:** select your `authentik Self-signed Certificate`
@@ -256,7 +280,7 @@ Things to verify:
   the OIDC callback URL — without them, the callback may point at
   `http://...:3000` and Authentik will reject it.
 - The Authentik Web-UI provider's **Redirect URI** is the public callback,
-  not the internal one. E.g. `https://memory.dnspegasus.net/api/auth/callback/authentik`.
+  not the internal one. E.g. `https://memory.dnspegasus.net/api/auth/callback/oidc`.
 
 If your HAProxy lives on a different host than Docker, change `127.0.0.1`
 to the Docker host's address (and confirm `APP_BIND=0.0.0.0` so the port
@@ -266,28 +290,31 @@ listens on all interfaces).
 
 ## Local development (no TLS)
 
-For development against a local Authentik, you can skip Caddy and run the app
+For development against a local IdP, you can skip Caddy and run the app
 directly:
 
 ```bash
 pnpm install
 cp .env.example .env  # set PUBLIC_URL=http://localhost:3000 etc.
-docker compose up -d db
+docker compose up -d db embedder
 pnpm db:migrate
 pnpm dev
 ```
 
-The Authentik provider you use locally must accept
-`http://localhost:3000/api/auth/callback/authentik` as a redirect URI.
+The OIDC client you use locally must accept
+`http://localhost:3000/api/auth/callback/oidc` as a redirect URI.
 
 ---
 
 ## Troubleshooting
 
-- **`401 claim invalid: aud`** from `/api/mcp` — your MCP provider isn't
-  emitting `aud`. See **Setting the `aud` claim** above.
+- **`401 claim invalid: aud`** from `/api/mcp` — your MCP client isn't
+  emitting an `aud` claim matching `OIDC_AUDIENCE`. On Authentik this is a
+  scope mapping; on EntraID it's the API "Application ID URI"; on Keycloak
+  it's a client-scope audience mapper. See **Setting the `aud` claim** above
+  for the Authentik recipe; other IdPs need the equivalent in their UI.
 - **Auth.js callback fails with `OAUTH_CALLBACK_ERROR`** — your `PUBLIC_URL`
-  doesn't match the redirect URI Authentik is configured with. They must be
+  doesn't match the redirect URI your IdP is configured with. They must be
   exactly equal, scheme and trailing slash included.
 - **Caddy can't get a cert** — confirm DNS points to your host and ports
   80/443 are reachable. Uncomment the staging CA line in `Caddyfile` while

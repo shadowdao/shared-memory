@@ -1,5 +1,4 @@
 import NextAuth from "next-auth";
-import Authentik from "next-auth/providers/authentik";
 import { env } from "@/lib/env";
 import { db } from "@/lib/db/client";
 import { users } from "@/lib/db/schema";
@@ -7,17 +6,26 @@ import { users } from "@/lib/db/schema";
 /**
  * NextAuth (Auth.js v5) configuration.
  *
- * Authentik is the OIDC issuer. We store the user's OIDC `sub` + `iss` on
- * first sign-in, upserting a row in `users`. The internal user UUID lives on
- * the JWT/session so downstream code never has to re-resolve it.
+ * Uses a generic OIDC provider so any compliant identity provider works —
+ * Authentik (the example we run in dev), EntraID, Keycloak, Okta, Auth0,
+ * Zitadel, etc. The provider id is "oidc", which makes the callback URL
+ * `/api/auth/callback/oidc`. Whichever IdP you're using needs that URL
+ * registered as a redirect URI on its OAuth client.
+ *
+ * We store the user's OIDC `sub` + `iss` on first sign-in, upserting a row
+ * in `users`. The internal user UUID lives on the JWT/session so
+ * downstream code never has to re-resolve it.
  */
 export const { auth, handlers, signIn, signOut } = NextAuth({
   providers: [
-    Authentik({
+    {
+      id: "oidc",
+      name: "OIDC",
+      type: "oidc",
+      issuer: env().OIDC_ISSUER,
       clientId: env().OIDC_CLIENT_ID_WEB,
       clientSecret: env().OIDC_CLIENT_SECRET_WEB,
-      issuer: env().OIDC_ISSUER,
-    }),
+    },
   ],
   secret: env().NEXTAUTH_SECRET,
   session: { strategy: "jwt" },
