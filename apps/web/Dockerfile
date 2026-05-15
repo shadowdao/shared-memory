@@ -38,9 +38,9 @@ RUN pnpm --filter @shared-memory/web build
 
 # Bundle the migrator into a single ESM file so the runtime image doesn't
 # need tsx or the rest of devDependencies.
-RUN pnpm --filter @shared-memory/web exec esbuild apps/web/scripts/migrate.ts \
+RUN pnpm --filter @shared-memory/web exec esbuild scripts/migrate.ts \
     --bundle --platform=node --target=node20 --format=esm \
-    --outfile=apps/web/migrate.mjs
+    --outfile=migrate.mjs
 
 # ---------- runner ----------
 FROM node:20-alpine AS runner
