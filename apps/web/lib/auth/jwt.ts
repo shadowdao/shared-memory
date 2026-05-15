@@ -1,13 +1,21 @@
 import { createRemoteJWKSet, jwtVerify, errors as joseErrors } from "jose";
 import type { JWTPayload } from "jose";
 import { env } from "@/lib/env";
+import { CLI_TOKEN_KID, tokenKid, verifyCliToken } from "./cli-token";
 
 /**
- * Authenticates a bearer token issued by Authentik against the configured
- * OIDC issuer. Verifies signature (via JWKS), issuer, audience, and expiry.
+ * Authenticates a bearer token presented to the MCP endpoint. Two token
+ * kinds are accepted, dispatched by the JWT `kid` header:
  *
- * Used by the MCP endpoint to authenticate incoming Claude Code requests.
- * Distinct from the NextAuth session cookie path used by the Web UI.
+ *   - Authentik-issued OIDC access tokens (any kid) — verified against
+ *     Authentik's JWKS over the network.
+ *   - CLI tokens minted at /connect (kid="cli-v1") — verified locally
+ *     with the HMAC CLI_TOKEN_SECRET.
+ *
+ * Both resolve to the same `AuthenticatedClaims` shape so downstream code
+ * (`userContextFromClaims`) doesn't care which path produced them.
+ *
+ * This is distinct from the NextAuth session cookie path used by the Web UI.
  */
 
 type GlobalWithJwks = typeof globalThis & {
@@ -64,7 +72,24 @@ export async function authenticateBearer(authHeader: string | null): Promise<Aut
     throw new UnauthorizedError("empty bearer token", buildWwwAuthenticate("invalid_token"));
   }
 
+  // Dispatch by kid: CLI tokens are verified locally, everything else goes
+  // through Authentik JWKS. We never attempt JWKS verification for CLI
+  // tokens (or vice versa) so a kid mismatch fails fast.
+  const isCliToken = tokenKid(token) === CLI_TOKEN_KID;
+
   try {
+    if (isCliToken) {
+      const claims = await verifyCliToken(token);
+      // CLI tokens carry the user's real Authentik identity in oidc_iss /
+      // oidc_sub. Surface those on the standard claims shape so user
+      // context resolution is identical to the Authentik path.
+      return {
+        ...claims,
+        iss: claims.oidc_iss,
+        sub: claims.oidc_sub,
+      } as AuthenticatedClaims;
+    }
+
     const { payload } = await jwtVerify(token, jwks(), {
       issuer: env().OIDC_ISSUER,
       audience: env().OIDC_AUDIENCE,

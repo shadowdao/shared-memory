@@ -30,6 +30,10 @@ const envSchema = z.object({
   // NextAuth
   NEXTAUTH_SECRET: z.string().min(32, "NEXTAUTH_SECRET must be at least 32 chars"),
 
+  // Signing key for CLI tokens minted at /connect. Rotate this to invalidate
+  // every issued CLI token at once.
+  CLI_TOKEN_SECRET: z.string().min(32, "CLI_TOKEN_SECRET must be at least 32 chars"),
+
   // Behavior flags
   ALLOW_INSECURE_HTTP: Bool.optional().default(false),
 });
@@ -72,6 +76,7 @@ function buildPhaseStub(): Env {
     EMBEDDING_MODEL: "Xenova/bge-small-en-v1.5",
     EMBEDDING_DIM: 384,
     NEXTAUTH_SECRET: "build-phase-secret-not-used-at-runtime-xxxxxxxx",
+    CLI_TOKEN_SECRET: "build-phase-secret-not-used-at-runtime-xxxxxxxx",
     ALLOW_INSECURE_HTTP: false,
   };
 }

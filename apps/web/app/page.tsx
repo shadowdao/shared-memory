@@ -27,8 +27,13 @@ export default async function HomePage() {
       <hr style={{ borderColor: "var(--border)", margin: "2rem 0" }} />
       <h2>MCP endpoint</h2>
       <p className="muted">
-        Connect a Claude Code session to <code>/api/mcp</code> with a bearer token
-        issued by Authentik for this resource. See the README for setup steps.
+        Connect a Claude Code session to <code>/api/mcp</code> with a bearer
+        token. For containerized clients without OAuth loopback,{" "}
+        {session?.user ? (
+          <Link href="/connect">generate a CLI token →</Link>
+        ) : (
+          <>sign in and visit <code>/connect</code></>
+        )}
       </p>
     </main>
   );
