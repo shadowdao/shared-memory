@@ -26,6 +26,7 @@ RUN --mount=type=cache,id=pnpm,target=/root/.local/share/pnpm/store \
 FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps/web/node_modules ./apps/web/node_modules
+COPY --from=deps /app/packages/schemas/node_modules ./packages/schemas/node_modules
 COPY . .
 
 # Build the Next.js standalone bundle. Env validation is bypassed here so
