@@ -21,9 +21,8 @@ const envSchema = z.object({
   // Database
   DATABASE_URL: z.string().url(),
 
-  // Embedder (used in Phase 2; present-but-empty allowed in Phase 1)
-  EMBEDDER_URL: z
-    .preprocess((v) => (v === "" ? undefined : v), z.string().url().optional()),
+  // Embedder sidecar — required in Phase 2 since memory.write embeds inline.
+  EMBEDDER_URL: z.string().url(),
   EMBEDDING_MODEL: z.string().default("Xenova/bge-small-en-v1.5"),
   EMBEDDING_DIM: z.coerce.number().int().positive().default(384),
 
@@ -72,7 +71,7 @@ function buildPhaseStub(): Env {
     OIDC_CLIENT_ID_MCP: "build",
     OIDC_AUDIENCE: "build",
     DATABASE_URL: "postgres://build:build@build-phase.invalid:5432/build",
-    EMBEDDER_URL: undefined,
+    EMBEDDER_URL: "http://embedder.invalid:8080",
     EMBEDDING_MODEL: "Xenova/bge-small-en-v1.5",
     EMBEDDING_DIM: 384,
     NEXTAUTH_SECRET: "build-phase-secret-not-used-at-runtime-xxxxxxxx",

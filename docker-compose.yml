@@ -41,8 +41,32 @@ services:
     networks:
       - internal
 
-  # One-shot migration runner. Exits 0 when migrations are up-to-date;
-  # `app` waits on its successful completion before starting.
+  # Embedding sidecar — loads bge-small-en-v1.5 once and serves /embed.
+  # First boot downloads the model (~30 MB) into a named volume so future
+  # boots are warm.
+  embedder:
+    image: ${EMBEDDER_IMAGE_REF:-shared-memory-embedder:local}
+    build:
+      context: .
+      dockerfile: apps/embedder/Dockerfile
+    restart: unless-stopped
+    environment:
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-Xenova/bge-small-en-v1.5}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - embedder_models:/data/models
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/health | grep -q '\"ready\":true' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 180s
+    networks:
+      - internal
+
+  # One-shot migration runner + embedding backfill. Exits 0 when both are
+  # up-to-date; `app` waits on its successful completion before starting.
   migrator:
     image: ${IMAGE_REF:-shared-memory-web:local}
     build:
@@ -52,8 +76,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      embedder:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      EMBEDDER_URL: ${EMBEDDER_URL:-http://embedder:8080}
     command: ["node", "apps/web/migrate.mjs"]
     networks:
       - internal
@@ -66,6 +93,8 @@ services:
     restart: unless-stopped
     depends_on:
       db:
+        condition: service_healthy
+      embedder:
         condition: service_healthy
       migrator:
         condition: service_completed_successfully
@@ -87,7 +116,7 @@ services:
 
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
 
-      EMBEDDER_URL: ${EMBEDDER_URL:-}
+      EMBEDDER_URL: ${EMBEDDER_URL:-http://embedder:8080}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-Xenova/bge-small-en-v1.5}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
 
@@ -137,6 +166,7 @@ volumes:
   db_data:
   caddy_data:
   caddy_config:
+  embedder_models:
 
 networks:
   internal:

@@ -72,8 +72,85 @@ async function main() {
     }
 
     console.log("Migrations complete.");
+
+    if (process.env.EMBEDDER_URL) {
+      await backfillEmbeddings(sql);
+    } else {
+      console.log("EMBEDDER_URL not set — skipping embedding backfill.");
+    }
   } finally {
     await sql.end({ timeout: 5 });
+  }
+}
+
+/**
+ * Backfill embedding column for any memory written before embeddings were
+ * online. Idempotent: only touches rows where embedding IS NULL. Runs on
+ * every migrator boot, so deploying Phase 2 — or recovering from an
+ * embedder outage that left fresh rows unembedded — needs no manual step.
+ */
+async function backfillEmbeddings(sql: ReturnType<typeof postgres>) {
+  const embedderUrl = process.env.EMBEDDER_URL!.replace(/\/$/, "");
+  const BATCH = 32;
+
+  // Wait for the embedder to report ready — its first boot has to download
+  // and load the model, which can take 30–60s on a cold container.
+  const waitDeadline = Date.now() + 180_000;
+  for (;;) {
+    try {
+      const res = await fetch(`${embedderUrl}/health`);
+      if (res.ok) {
+        const body = (await res.json()) as { ready?: boolean };
+        if (body.ready) break;
+      }
+    } catch {
+      /* embedder not up yet */
+    }
+    if (Date.now() > waitDeadline) {
+      throw new Error("embedder did not become ready within 180s");
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+
+  let total = 0;
+  for (;;) {
+    const rows = await sql<{ id: string; content: string }[]>`
+      SELECT id, content FROM memories
+      WHERE embedding IS NULL AND deleted_at IS NULL
+      ORDER BY created_at
+      LIMIT ${BATCH}
+    `;
+    if (rows.length === 0) break;
+
+    const res = await fetch(`${embedderUrl}/embed`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ texts: rows.map((r) => r.content) }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`embedder error ${res.status}: ${detail.slice(0, 200)}`);
+    }
+    const { vectors } = (await res.json()) as { vectors: number[][] };
+
+    await sql.begin(async (tx) => {
+      for (let i = 0; i < rows.length; i++) {
+        const id = rows[i]!.id;
+        const vec = vectors[i];
+        if (!vec) continue;
+        const literal = `[${vec.join(",")}]`;
+        await tx`UPDATE memories SET embedding = ${literal}::vector WHERE id = ${id}`;
+      }
+    });
+
+    total += rows.length;
+    console.log(`  embedded ${rows.length} memories (total: ${total})`);
+  }
+
+  if (total === 0) {
+    console.log("Embedding backfill: nothing to do.");
+  } else {
+    console.log(`Embedding backfill complete: ${total} memories embedded.`);
   }
 }
 

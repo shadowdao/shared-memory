@@ -42,6 +42,24 @@ export const MemoryIdInput = z.object({
 });
 export type MemoryIdInput = z.infer<typeof MemoryIdInput>;
 
+export const MemoryUpdateInput = z.object({
+  id: z.string().uuid(),
+  content: MemoryContent.optional(),
+  tags: Tags.optional(),
+}).refine((v) => v.content !== undefined || v.tags !== undefined, {
+  message: "memory.update requires content or tags",
+});
+export type MemoryUpdateInput = z.infer<typeof MemoryUpdateInput>;
+
+export const MemorySearchInput = z.object({
+  query: z.string().min(1).max(2000),
+  project: ProjectKey.optional(),
+  scope: MemoryScope.optional(),
+  tags: z.array(z.string()).optional(),
+  limit: z.number().int().min(1).max(50).default(10),
+});
+export type MemorySearchInput = z.infer<typeof MemorySearchInput>;
+
 export const ProjectIdentifyInput = z.object({
   key: ProjectKey,
   display_name: z.string().min(1).max(200).optional(),
