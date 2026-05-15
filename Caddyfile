@@ -1,0 +1,33 @@
+# Caddy config for shared-memory.
+#
+# Hostname and ACME email come from environment variables set by docker-compose
+# (which loads them from .env). For local development without TLS, override
+# this file or set APP_HOSTNAME=localhost and use a docker-compose override.
+
+{
+	email {$ACME_EMAIL}
+	# Uncomment to use the Let's Encrypt staging directory while testing:
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{$APP_HOSTNAME} {
+	encode gzip zstd
+
+	# Trust X-Forwarded-* from this proxy. Auth.js + Next.js use these to
+	# construct callback URLs that match PUBLIC_URL.
+	header {
+		# Tell upstream we terminated TLS.
+		# (`reverse_proxy` already sets X-Forwarded-* by default.)
+	}
+
+	reverse_proxy app:3000 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

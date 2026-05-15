@@ -1,0 +1,28 @@
+# VCS
+.git
+.gitignore
+
+# Local env — must NEVER end up in image layers
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+**/node_modules
+**/.next
+**/dist
+**/build
+**/.turbo
+**/coverage
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+
+# Logs
+*.log
+
+# Misc
+*.md
+!README.md

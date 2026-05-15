@@ -1,0 +1,144 @@
+# =============================================================================
+# shared-memory — compose stack.
+#
+# Two supported deployment modes:
+#
+#   1. Behind an external reverse proxy (DEFAULT)
+#      The `app` service exposes ${APP_PORT:-3000} on the host. Point your
+#      proxy (HAProxy, nginx, Traefik, Cloudflare Tunnel, etc.) at it. The
+#      app trusts X-Forwarded-Proto / X-Forwarded-Host headers so callbacks
+#      and MCP discovery URLs use PUBLIC_URL correctly.
+#
+#         docker compose up -d
+#
+#   2. Built-in TLS via Caddy (opt-in profile)
+#      Adds a Caddy reverse proxy on host ports 80/443 with automatic
+#      Let's Encrypt certificates for $APP_HOSTNAME. Use this on a VM that
+#      doesn't already sit behind a proxy.
+#
+#         docker compose --profile tls up -d
+#
+# All runtime config lives in .env (never committed). See .env.example.
+# =============================================================================
+
+name: shared-memory
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER not set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD not set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB not set in .env}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - internal
+
+  # One-shot migration runner. Exits 0 when migrations are up-to-date;
+  # `app` waits on its successful completion before starting.
+  migrator:
+    image: ${IMAGE_REF:-shared-memory-web:local}
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    command: ["node", "apps/web/migrate.mjs"]
+    networks:
+      - internal
+
+  app:
+    image: ${IMAGE_REF:-shared-memory-web:local}
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+      PUBLIC_URL: ${PUBLIC_URL:?PUBLIC_URL not set in .env}
+
+      # Auth.js v5 needs to know its public URL when behind a reverse proxy.
+      AUTH_URL: ${PUBLIC_URL}
+      AUTH_TRUST_HOST: "true"
+
+      OIDC_ISSUER: ${OIDC_ISSUER:?OIDC_ISSUER not set in .env}
+      OIDC_CLIENT_ID_WEB: ${OIDC_CLIENT_ID_WEB:?required}
+      OIDC_CLIENT_SECRET_WEB: ${OIDC_CLIENT_SECRET_WEB:?required}
+      OIDC_CLIENT_ID_MCP: ${OIDC_CLIENT_ID_MCP:?required}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:?required}
+
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+
+      EMBEDDER_URL: ${EMBEDDER_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-Xenova/bge-small-en-v1.5}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-384}
+
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?required}
+    ports:
+      # Exposed to the host so an external reverse proxy (HAProxy, nginx,
+      # etc.) can reach the app. When using the `tls` profile, Caddy also
+      # proxies via the internal network — leaving this exposed is harmless
+      # but you can bind to 127.0.0.1 only by setting APP_BIND=127.0.0.1.
+      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - internal
+      - web
+
+  # Opt-in TLS terminator. Skipped unless `--profile tls` is passed.
+  # External-proxy deployments (HAProxy, nginx, Cloudflare Tunnel, etc.)
+  # leave this off and proxy directly to host:${APP_PORT}.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      APP_HOSTNAME: ${APP_HOSTNAME:-localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - web
+
+volumes:
+  db_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:
+    driver: bridge
+  web:
+    driver: bridge
