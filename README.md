@@ -231,20 +231,72 @@ prompt, never reaching the app.
 
 ## Connecting Claude Code
 
-In a future Phase, we'll publish a one-line Claude Code config snippet. For
-Phase 1, follow the [MCP authorization flow][mcp-auth]:
+Two paths, in order of preference:
 
-1. Add the MCP server to Claude Code's config, pointing at
-   `https://memory.dnspegasus.net/api/mcp`.
-2. On first connection, the server returns 401 with `WWW-Authenticate`
-   pointing at `/.well-known/oauth-protected-resource`.
-3. Claude Code reads the protected-resource metadata, follows the link to
-   Authentik's discovery doc, and runs the OAuth 2.1 PKCE flow.
-4. You'll be prompted in your browser to authenticate with Authentik.
-5. Claude Code stores the access token and uses it on subsequent requests.
+### A. OAuth flow (recommended — picks up your IdP credentials)
 
-If Authentik refuses the redirect URI Claude Code attempts to use, copy the
-URI from the error and add it under the MCP provider's **Redirect URIs**.
+```bash
+claude mcp add --transport http --scope user \
+  --client-id <OIDC_CLIENT_ID_MCP> \
+  --callback-port 33418 \
+  shared-memory https://memory.dnspegasus.net/api/mcp
+```
+
+What happens:
+
+1. Claude Code hits `/api/mcp`, gets 401 with our `WWW-Authenticate` header
+2. It reads `/.well-known/oauth-protected-resource`, finds your OIDC issuer
+3. It opens an authorize URL in your browser and starts a local listener
+   on the `--callback-port` you specified
+4. You authenticate with your IdP in the browser
+5. The IdP redirects back to `http://localhost:33418/callback?code=…`,
+   Claude Code's listener catches it, exchanges the code for an access
+   token, and stores it
+
+`--callback-port` is required because your IdP only accepts pre-registered
+redirect URIs. Pick any free port; just make sure the matching URI is in
+your MCP client's **Redirect URIs** list. Authentik users with the regex
+pattern from the setup step (`^http://(127\.0\.0\.1|localhost):\d+/.*$`)
+can use any port without re-registering.
+
+### B. Manual-paste fallback (when loopback isn't reachable)
+
+Sealed containers, devboxes without port forwarding, etc. The redirect URI
+in this case is hosted by *this* server:
+
+```bash
+claude mcp add --transport http --scope user \
+  --client-id <OIDC_CLIENT_ID_MCP> \
+  --callback-port 0 \
+  shared-memory https://memory.dnspegasus.net/api/mcp
+```
+
+When the loopback listener times out, Claude Code prompts you to paste the
+callback URL. Open the authorize URL Claude Code printed in your browser,
+sign in, and your IdP redirects to
+`https://memory.dnspegasus.net/auth/cli-callback?code=…`. That page shows
+the `code` and the full URL with copy buttons — paste either back into
+Claude Code's prompt to complete the flow.
+
+The manual-fallback URI must be registered on your MCP client too:
+`https://memory.dnspegasus.net/auth/cli-callback`.
+
+### C. Static bearer token (no browser at all)
+
+For fully headless / CI scenarios, mint a long-lived HMAC token at
+`https://memory.dnspegasus.net/connect` and pass it via `--header`. See
+the `/connect` page for the exact `claude mcp add` command it generates
+for you.
+
+### Why no zero-config plugin yet
+
+Claude Code plugins can ship an MCP server entry that handles OAuth
+without any flags — but only when the auth server supports Dynamic Client
+Registration (RFC 7591). Authentik is tracking DCR in
+[goauthentik/authentik#8751](https://github.com/goauthentik/authentik/issues/8751);
+once it ships we'll publish a plugin so the entire flow above collapses
+to `/plugin install shared-memory`. Other IdPs that already support DCR
+(Asana-style) can wire this up sooner.
 
 [mcp-auth]: https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization
 
