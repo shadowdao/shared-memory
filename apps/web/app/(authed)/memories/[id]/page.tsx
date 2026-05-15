@@ -126,11 +126,7 @@ export default async function MemoryDetailPage({
       </Card>
 
       {!isEditing ? (
-        <form
-          action={deleteMemoryAction}
-          onSubmit={() => undefined}
-          className="flex justify-end"
-        >
+        <form action={deleteMemoryAction} className="flex justify-end">
           <input type="hidden" name="id" value={m.id} />
           <Button type="submit" variant="danger" size="sm">
             Delete memory
