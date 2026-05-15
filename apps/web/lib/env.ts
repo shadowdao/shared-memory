@@ -22,7 +22,8 @@ const envSchema = z.object({
   DATABASE_URL: z.string().url(),
 
   // Embedder (used in Phase 2; present-but-empty allowed in Phase 1)
-  EMBEDDER_URL: z.string().url().optional(),
+  EMBEDDER_URL: z
+    .preprocess((v) => (v === "" ? undefined : v), z.string().url().optional()),
   EMBEDDING_MODEL: z.string().default("Xenova/bge-small-en-v1.5"),
   EMBEDDING_DIM: z.coerce.number().int().positive().default(384),
 
