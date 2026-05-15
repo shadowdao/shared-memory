@@ -1,5 +1,5 @@
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
-import { db, pg } from "@/lib/db/client";
+import { db } from "@/lib/db/client";
 import { memories, projects, auditLog } from "@/lib/db/schema";
 import {
   MemoryIdInput,
@@ -10,6 +10,7 @@ import {
   ProjectIdentifyInput,
 } from "@shared-memory/schemas";
 import { embedText } from "@/lib/embedder";
+import { searchMemories } from "@/lib/memories";
 import type { UserContext } from "./context";
 
 /**
@@ -60,11 +61,6 @@ async function resolveProjectId(
     .where(and(eq(projects.userId, ctx.userId), eq(projects.key, projectKey)))
     .limit(1);
   return row[0]?.id ?? null;
-}
-
-/** pgvector accepts vectors as text literals like "[0.1,0.2,...]". */
-function toVectorLiteral(v: number[]): string {
-  return `[${v.join(",")}]`;
 }
 
 // ---------- tools ----------
@@ -368,13 +364,6 @@ const memoryUpdate: ToolDef = {
   },
 };
 
-interface RankAccumulator {
-  vectorRank?: number;
-  ftsRank?: number;
-  tagRank?: number;
-  rrfScore: number;
-}
-
 const memorySearch: ToolDef = {
   name: "memory.search",
   description:
@@ -399,87 +388,21 @@ const memorySearch: ToolDef = {
       ? await resolveProjectId(ctx, parsed.data.project)
       : null;
     if (parsed.data.project && !projectId) {
-      return ok({ items: [], _ranks: {} }, "0 results (unknown project)");
+      return ok({ items: [], debug: { vec: 0, fts: 0, tag: 0 } }, "0 results (unknown project)");
     }
 
-    const queryVec = await embedText(query);
-    const vecLit = toVectorLiteral(queryVec);
-    const CANDIDATES = 50;
-    const RRF_K = 60;
+    const result = await searchMemories(
+      ctx.userId,
+      query,
+      { scope, projectKey: parsed.data.project, tags },
+      limit,
+    );
 
-    // Run the three candidate-fetch queries in parallel. The filter is
-    // expressed via pg's tagged-template binding so values are safely
-    // interpolated.
-    const userId = ctx.userId;
-
-    const vecPromise = pg<{ id: string }[]>`
-      SELECT id
-      FROM memories
-      WHERE user_id = ${userId}
-        AND deleted_at IS NULL
-        AND embedding IS NOT NULL
-        ${scope ? pg`AND scope = ${scope}` : pg``}
-        ${projectId ? pg`AND project_id = ${projectId}` : pg``}
-      ORDER BY embedding <=> ${vecLit}::vector ASC
-      LIMIT ${CANDIDATES}
-    `;
-
-    const ftsPromise = pg<{ id: string }[]>`
-      SELECT id
-      FROM memories, plainto_tsquery('english', ${query}) AS q
-      WHERE user_id = ${userId}
-        AND deleted_at IS NULL
-        AND content_tsv @@ q
-        ${scope ? pg`AND scope = ${scope}` : pg``}
-        ${projectId ? pg`AND project_id = ${projectId}` : pg``}
-      ORDER BY ts_rank_cd(content_tsv, q) DESC
-      LIMIT ${CANDIDATES}
-    `;
-
-    const tagPromise =
-      tags && tags.length > 0
-        ? pg<{ id: string }[]>`
-            SELECT id
-            FROM memories
-            WHERE user_id = ${userId}
-              AND deleted_at IS NULL
-              AND tags && ${tags}::text[]
-              ${scope ? pg`AND scope = ${scope}` : pg``}
-              ${projectId ? pg`AND project_id = ${projectId}` : pg``}
-            ORDER BY cardinality(
-              ARRAY(SELECT unnest(tags) INTERSECT SELECT unnest(${tags}::text[]))
-            ) DESC
-            LIMIT ${CANDIDATES}
-          `
-        : Promise.resolve([] as { id: string }[]);
-
-    const [vecHits, ftsHits, tagHits] = await Promise.all([
-      vecPromise,
-      ftsPromise,
-      tagPromise,
-    ]);
-
-    // Fuse via RRF: score(d) = Σ_r 1/(k + rank_r(d))
-    const scores = new Map<string, RankAccumulator>();
-    const accum = (id: string, rank: number, key: "vectorRank" | "ftsRank" | "tagRank") => {
-      const e = scores.get(id) ?? { rrfScore: 0 };
-      e[key] = rank;
-      e.rrfScore += 1 / (RRF_K + rank);
-      scores.set(id, e);
-    };
-    vecHits.forEach((h, i) => accum(h.id, i + 1, "vectorRank"));
-    ftsHits.forEach((h, i) => accum(h.id, i + 1, "ftsRank"));
-    tagHits.forEach((h, i) => accum(h.id, i + 1, "tagRank"));
-
-    if (scores.size === 0) {
-      return ok({ items: [], debug: { vec: 0, fts: 0, tag: 0 } }, "0 results");
+    if (result.hits.length === 0) {
+      return ok({ items: [], debug: result.debug }, "0 results");
     }
 
-    const sorted = [...scores.entries()]
-      .sort(([, a], [, b]) => b.rrfScore - a.rrfScore)
-      .slice(0, limit);
-    const topIds = sorted.map(([id]) => id);
-
+    const topIds = result.hits.map((h) => h.id);
     const rows = await db
       .select({
         id: memories.id,
@@ -494,33 +417,18 @@ const memorySearch: ToolDef = {
       .where(inArray(memories.id, topIds));
 
     const byId = new Map(rows.map((r) => [r.id, r]));
-    const items = sorted.flatMap(([id, rank]) => {
-      const row = byId.get(id);
+    const items = result.hits.flatMap((hit) => {
+      const row = byId.get(hit.id);
       if (!row) return [];
       return [
         {
           ...row,
-          _rank: {
-            rrfScore: Number(rank.rrfScore.toFixed(6)),
-            vectorRank: rank.vectorRank ?? null,
-            ftsRank: rank.ftsRank ?? null,
-            tagRank: rank.tagRank ?? null,
-          },
+          _rank: hit.rank,
         },
       ];
     });
 
-    return ok(
-      {
-        items,
-        debug: {
-          vec: vecHits.length,
-          fts: ftsHits.length,
-          tag: tagHits.length,
-        },
-      },
-      `${items.length} result(s)`,
-    );
+    return ok({ items, debug: result.debug }, `${items.length} result(s)`);
   },
 };
 

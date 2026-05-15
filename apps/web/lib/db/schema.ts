@@ -126,6 +126,25 @@ export const snippets = pgTable(
   }),
 );
 
+export const cliTokens = pgTable(
+  "cli_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    jti: text("jti").notNull().unique(),
+    name: text("name").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => ({
+    userIdx: index("cli_tokens_user_idx").on(t.userId),
+  }),
+);
+
 export const auditLog = pgTable(
   "audit_log",
   {
@@ -158,5 +177,7 @@ export type Memory = typeof memories.$inferSelect;
 export type NewMemory = typeof memories.$inferInsert;
 export type Snippet = typeof snippets.$inferSelect;
 export type NewSnippet = typeof snippets.$inferInsert;
+export type CliToken = typeof cliTokens.$inferSelect;
+export type NewCliToken = typeof cliTokens.$inferInsert;
 export type AuditEntry = typeof auditLog.$inferSelect;
 export type NewAuditEntry = typeof auditLog.$inferInsert;

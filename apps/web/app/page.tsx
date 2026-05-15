@@ -1,40 +1,53 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { auth } from "@/auth";
+import { Button } from "@/app/_components/ui/button";
 
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
   const session = await auth();
+  // Signed-in users always go to the app; the landing is for anonymous
+  // visitors only.
+  if (session?.user) redirect("/dashboard");
 
   return (
-    <main className="container">
-      <h1>shared-memory</h1>
-      <p className="muted">
-        Self-hosted MCP server providing shared persistent memory across Claude Code sessions.
-      </p>
+    <main className="min-h-screen flex items-center justify-center px-4">
+      <div className="max-w-xl w-full text-center space-y-6">
+        <div className="inline-flex items-center gap-2 text-fg-muted text-sm">
+          <span className="inline-block size-2 rounded-full bg-accent-400" />
+          shared-memory
+        </div>
 
-      {session?.user ? (
-        <p>
-          Signed in as <strong>{session.user.email ?? session.user.name ?? session.user.id}</strong>{" "}
-          — <Link href="/me">view session</Link>
-        </p>
-      ) : (
-        <p>
-          <Link href="/api/auth/signin">Sign in with Authentik</Link>
-        </p>
-      )}
+        <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight text-fg">
+          Shared, persistent memory<br />for every Claude Code session.
+        </h1>
 
-      <hr style={{ borderColor: "var(--border)", margin: "2rem 0" }} />
-      <h2>MCP endpoint</h2>
-      <p className="muted">
-        Connect a Claude Code session to <code>/api/mcp</code> with a bearer
-        token. For containerized clients without OAuth loopback,{" "}
-        {session?.user ? (
-          <Link href="/connect">generate a CLI token →</Link>
-        ) : (
-          <>sign in and visit <code>/connect</code></>
-        )}
-      </p>
+        <p className="text-fg-muted max-w-md mx-auto">
+          A self-hosted MCP server that lets the Claude Codes on your laptop,
+          server, and any container share durable memories, scoped per
+          project or globally.
+        </p>
+
+        <div className="flex justify-center gap-3 pt-2">
+          <Link href="/api/auth/signin?callbackUrl=/dashboard" className="no-underline">
+            <Button>Sign in with OIDC</Button>
+          </Link>
+          <a
+            href="https://repo.anhonesthost.net/jknapp/shared-memory"
+            className="no-underline"
+            target="_blank"
+            rel="noreferrer"
+          >
+            <Button variant="secondary">Source</Button>
+          </a>
+        </div>
+
+        <p className="text-xs text-fg-subtle pt-6">
+          MCP endpoint at <code>/api/mcp</code> · OAuth discovery at{" "}
+          <code>/.well-known/oauth-protected-resource</code>
+        </p>
+      </div>
     </main>
   );
 }
