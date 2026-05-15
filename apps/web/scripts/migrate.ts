@@ -5,13 +5,31 @@
  * features we need (pgvector, generated columns), so we manage migration
  * state ourselves in `_migrations` and apply files as plain SQL.
  */
+import { existsSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const MIGRATIONS_DIR = join(__dirname, "..", "drizzle");
+
+// Resolve the migrations directory. Try, in order:
+//   1. $MIGRATIONS_DIR env override (explicit deploy-time control)
+//   2. `<script>/drizzle`  — production: migrate.mjs sits alongside drizzle/
+//   3. `<script>/../drizzle` — dev: scripts/migrate.ts has drizzle/ one up
+function findMigrationsDir(): string {
+  if (process.env.MIGRATIONS_DIR) return process.env.MIGRATIONS_DIR;
+  const sibling = join(__dirname, "drizzle");
+  if (existsSync(sibling)) return sibling;
+  const parent = join(__dirname, "..", "drizzle");
+  if (existsSync(parent)) return parent;
+  throw new Error(
+    `Couldn't locate migrations directory (tried ${sibling}, ${parent}). ` +
+      `Set MIGRATIONS_DIR to override.`,
+  );
+}
+
+const MIGRATIONS_DIR = findMigrationsDir();
 
 async function main() {
   const url = process.env.DATABASE_URL;
