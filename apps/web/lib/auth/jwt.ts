@@ -40,6 +40,14 @@ function jwks() {
 export interface AuthenticatedClaims extends JWTPayload {
   sub: string;
   iss: string;
+  /**
+   * Group names from the OIDC `groups` claim. Authentik / Keycloak / properly-
+   * configured EntraID emit `string[]` here. We coerce non-array / non-string
+   * entries away and present an empty array if the claim is absent. For CLI
+   * (HMAC) tokens this is always undefined — the consumer (userContextFromClaims)
+   * falls back to the DB snapshot from the user's last interactive sign-in.
+   */
+  groups?: string[];
 }
 
 export class UnauthorizedError extends Error {
@@ -50,6 +58,23 @@ export class UnauthorizedError extends Error {
     super(reason);
     this.name = "UnauthorizedError";
   }
+}
+
+/**
+ * Pull `groups` off a verified OIDC payload as a clean `string[]`. Non-
+ * string entries are dropped silently. Returns undefined when the claim
+ * is absent so callers can distinguish "no claim emitted" from "user is
+ * in zero groups" (`[]`).
+ */
+function extractGroupsClaim(payload: JWTPayload): string[] | undefined {
+  const raw = (payload as { groups?: unknown }).groups;
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const v of raw) {
+    if (typeof v === "string" && v.trim().length > 0) out.push(v.trim());
+  }
+  return out;
 }
 
 function buildWwwAuthenticate(error?: string, description?: string): string {
@@ -82,7 +107,9 @@ export async function authenticateBearer(authHeader: string | null): Promise<Aut
       const claims = await verifyCliToken(token);
       // CLI tokens carry the user's real Authentik identity in oidc_iss /
       // oidc_sub. Surface those on the standard claims shape so user
-      // context resolution is identical to the Authentik path.
+      // context resolution is identical to the Authentik path. CLI tokens
+      // never carry a groups claim — leave `groups` undefined; the user-
+      // context resolver falls back to the DB snapshot.
       return {
         ...claims,
         iss: claims.oidc_iss,
@@ -100,7 +127,7 @@ export async function authenticateBearer(authHeader: string | null): Promise<Aut
         buildWwwAuthenticate("invalid_token", "missing sub"),
       );
     }
-    return payload as AuthenticatedClaims;
+    return { ...payload, groups: extractGroupsClaim(payload) } as AuthenticatedClaims;
   } catch (err) {
     if (err instanceof UnauthorizedError) throw err;
     const desc =

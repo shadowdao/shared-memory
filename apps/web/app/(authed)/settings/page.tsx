@@ -53,6 +53,19 @@ export default async function SettingsPage() {
             and revoke them.
           </CardBody>
         </Card>
+
+        <Card>
+          <CardHeader className="flex items-center">
+            <span className="text-sm font-medium text-fg flex-1">Groups</span>
+            <Link href="/settings/groups" className="no-underline">
+              <Button variant="secondary" size="sm">View groups</Button>
+            </Link>
+          </CardHeader>
+          <CardBody className="text-sm text-fg-muted">
+            OIDC group memberships from your IdP, refreshed at sign-in. Used
+            by the upcoming sharing feature to scope project visibility.
+          </CardBody>
+        </Card>
       </div>
     </Container>
   );

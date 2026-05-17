@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
+import { ProjectKey } from "@shared-memory/schemas";
 import { authenticateBearer, UnauthorizedError } from "@/lib/auth/jwt";
 import { userContextFromClaims } from "@/lib/mcp/context";
 import { dispatchMcpMessage } from "@/lib/mcp/server";
+import { upsertProject } from "@/lib/projects";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -49,8 +51,37 @@ export async function POST(req: Request) {
     );
   }
 
+  // ---- optional X-Project-Key header → default project for this request ----
+  // The header lets a client (e.g. a `claude mcp add` snippet generated from
+  // /settings/tokens) pin every call to a specific project without having to
+  // pass `project` on each tool invocation. Tools that take an optional
+  // `project` arg fall back to this when the caller omits it.
+  let defaultProjectKey: string | undefined;
+  const rawProjectKey = req.headers.get("x-project-key");
+  if (rawProjectKey !== null && rawProjectKey !== "") {
+    const parsed = ProjectKey.safeParse(rawProjectKey);
+    if (!parsed.success) {
+      return NextResponse.json(
+        {
+          error: "invalid X-Project-Key",
+          detail: parsed.error.issues.map((i) => i.message).join("; "),
+        },
+        { status: 400 },
+      );
+    }
+    defaultProjectKey = parsed.data;
+  }
+
   // ---- resolve user, dispatch ----
-  const ctx = await userContextFromClaims(claims);
+  const ctx = await userContextFromClaims(claims, { defaultProjectKey });
+
+  // Auto-create the header-supplied project if it doesn't exist yet. This
+  // makes pinning via `X-Project-Key` work transparently — the user doesn't
+  // have to call `project.identify` first when they paste the generated
+  // `claude mcp add` snippet from /settings/tokens.
+  if (defaultProjectKey) {
+    await upsertProject(ctx.userId, defaultProjectKey);
+  }
 
   // MCP supports batched requests (array) and single. Handle both.
   if (Array.isArray(body)) {
