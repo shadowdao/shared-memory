@@ -311,13 +311,24 @@ const memoryDelete: ToolDef = {
 const memoryUpdate: ToolDef = {
   name: "memory.update",
   description:
-    "Edit an existing memory in place — for correcting a stored fact, expanding it with new detail, or adjusting tags. Preserves the memory's id (so callers referencing it don't break) and re-embeds automatically when content changes. Use this — not delete + write — whenever you're refining what's already there.",
+    "Edit an existing memory in place — for correcting a stored fact, expanding it with new detail, adjusting tags, or moving it to a different scope/project. Preserves the memory's id (so callers referencing it don't break) and re-embeds automatically when content changes. Pass `scope` and/or `project` to reclassify a memory between user-global and project-attached without recreating it. Use this — not delete + write — whenever you're refining what's already there.",
   inputSchema: {
     type: "object",
     properties: {
       id: { type: "string", format: "uuid" },
       content: { type: "string", description: "Replacement content (1–64,000 chars)." },
       tags: { type: "array", items: { type: "string" }, description: "Replacement tag list." },
+      scope: {
+        type: "string",
+        enum: ["project", "user"],
+        description:
+          "New scope. When 'project', `project` must be set. When 'user', `project` must be omitted.",
+      },
+      project: {
+        type: "string",
+        description:
+          "Project key the memory should attach to (required and only valid when scope='project'). Project is upserted if it doesn't exist.",
+      },
     },
     required: ["id"],
   },
@@ -325,9 +336,16 @@ const memoryUpdate: ToolDef = {
     const parsed = MemoryUpdateInput.safeParse(args);
     if (!parsed.success) return err(parsed.error.message);
 
-    const existing = await db
-      .select({ id: memories.id, content: memories.content })
+    const existingRows = await db
+      .select({
+        id: memories.id,
+        content: memories.content,
+        scope: memories.scope,
+        projectId: memories.projectId,
+        projectKey: projects.key,
+      })
       .from(memories)
+      .leftJoin(projects, eq(memories.projectId, projects.id))
       .where(
         and(
           eq(memories.id, parsed.data.id),
@@ -336,13 +354,48 @@ const memoryUpdate: ToolDef = {
         ),
       )
       .limit(1);
-    if (!existing[0]) return err("not found");
+    const existing = existingRows[0];
+    if (!existing) return err("not found");
 
     const update: Record<string, unknown> = { updatedAt: new Date() };
     if (parsed.data.tags !== undefined) update.tags = parsed.data.tags;
-    if (parsed.data.content !== undefined && parsed.data.content !== existing[0].content) {
+    if (parsed.data.content !== undefined && parsed.data.content !== existing.content) {
       update.content = parsed.data.content;
       update.embedding = await embedText(parsed.data.content);
+    }
+
+    let scopeChanged = false;
+    let projectChanged = false;
+    let newProjectKey: string | null = existing.projectKey ?? null;
+
+    if (parsed.data.scope !== undefined) {
+      if (parsed.data.scope === "user") {
+        if (existing.scope !== "user") {
+          update.scope = "user";
+          scopeChanged = true;
+        }
+        if (existing.projectId !== null) {
+          update.projectId = null;
+          projectChanged = true;
+          newProjectKey = null;
+        }
+      } else {
+        // scope === 'project' — schema refine guarantees `project` is set
+        const projectKey = parsed.data.project!;
+        const projectId = await resolveProjectId(ctx, projectKey);
+        if (!projectId) {
+          return err(`unknown project '${projectKey}'; call project.identify first`);
+        }
+        if (existing.scope !== "project") {
+          update.scope = "project";
+          scopeChanged = true;
+        }
+        if (existing.projectId !== projectId) {
+          update.projectId = projectId;
+          projectChanged = true;
+          newProjectKey = projectKey;
+        }
+      }
     }
 
     const updated = await db
@@ -351,15 +404,26 @@ const memoryUpdate: ToolDef = {
       .where(eq(memories.id, parsed.data.id))
       .returning({ id: memories.id, updatedAt: memories.updatedAt });
 
+    const auditFields = Object.keys(update).filter((k) => k !== "updatedAt");
+    const auditPayload: Record<string, unknown> = { fields: auditFields };
+    if (scopeChanged || projectChanged) {
+      auditPayload.scope = {
+        from: existing.scope,
+        to: update.scope ?? existing.scope,
+      };
+      auditPayload.projectKey = {
+        from: existing.projectKey ?? null,
+        to: newProjectKey,
+      };
+    }
+
     await db.insert(auditLog).values({
       userId: ctx.userId,
       actor: "mcp",
       action: "memory.update",
       entityType: "memory",
       entityId: updated[0]!.id,
-      payload: {
-        fields: Object.keys(update).filter((k) => k !== "updatedAt"),
-      },
+      payload: auditPayload,
     });
 
     return ok(updated[0]!, `updated memory ${updated[0]!.id}`);

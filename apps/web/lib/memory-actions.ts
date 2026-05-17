@@ -113,33 +113,92 @@ export async function updateMemoryAction(formData: FormData) {
   const userId = await requireUserId();
 
   const id = String(formData.get("id") ?? "");
+  const rawScope = formData.get("scope");
+  const rawProject = (formData.get("project") as string | null)?.trim() || undefined;
   const payload = {
     id,
     content: ((formData.get("content") as string | null) ?? "").trim() || undefined,
     tags: parseTags(formData.get("tags")),
+    scope:
+      rawScope === "project" || rawScope === "user"
+        ? (rawScope as "project" | "user")
+        : undefined,
+    project: rawProject,
   };
   const parsed = MemoryUpdateInput.safeParse(payload);
   if (!parsed.success) {
     throw new Error(parsed.error.issues.map((i) => i.message).join("; "));
   }
 
-  const existing = await db
-    .select({ id: memories.id, content: memories.content })
+  const existingRows = await db
+    .select({
+      id: memories.id,
+      content: memories.content,
+      scope: memories.scope,
+      projectId: memories.projectId,
+      projectKey: projects.key,
+    })
     .from(memories)
+    .leftJoin(projects, eq(memories.projectId, projects.id))
     .where(
       and(eq(memories.id, parsed.data.id), eq(memories.userId, userId), isNull(memories.deletedAt)),
     )
     .limit(1);
-  if (!existing[0]) throw new Error("not found");
+  const existing = existingRows[0];
+  if (!existing) throw new Error("not found");
 
   const update: Record<string, unknown> = { updatedAt: new Date() };
   if (parsed.data.tags !== undefined) update.tags = parsed.data.tags;
-  if (parsed.data.content !== undefined && parsed.data.content !== existing[0].content) {
+  if (parsed.data.content !== undefined && parsed.data.content !== existing.content) {
     update.content = parsed.data.content;
     update.embedding = await embedText(parsed.data.content);
   }
 
+  let scopeChanged = false;
+  let projectChanged = false;
+  let newProjectKey: string | null = existing.projectKey ?? null;
+
+  if (parsed.data.scope !== undefined) {
+    if (parsed.data.scope === "user") {
+      if (existing.scope !== "user") {
+        update.scope = "user";
+        scopeChanged = true;
+      }
+      if (existing.projectId !== null) {
+        update.projectId = null;
+        projectChanged = true;
+        newProjectKey = null;
+      }
+    } else {
+      // scope === 'project' — schema refine guarantees project is set
+      const projectKey = parsed.data.project!;
+      const projectId = await upsertProject(userId, projectKey);
+      if (existing.scope !== "project") {
+        update.scope = "project";
+        scopeChanged = true;
+      }
+      if (existing.projectId !== projectId) {
+        update.projectId = projectId;
+        projectChanged = true;
+        newProjectKey = projectKey;
+      }
+    }
+  }
+
   await db.update(memories).set(update).where(eq(memories.id, parsed.data.id));
+
+  const auditFields = Object.keys(update).filter((k) => k !== "updatedAt");
+  const auditPayload: Record<string, unknown> = { fields: auditFields };
+  if (scopeChanged || projectChanged) {
+    auditPayload.scope = {
+      from: existing.scope,
+      to: update.scope ?? existing.scope,
+    };
+    auditPayload.projectKey = {
+      from: existing.projectKey ?? null,
+      to: newProjectKey,
+    };
+  }
 
   await db.insert(auditLog).values({
     userId,
@@ -147,7 +206,7 @@ export async function updateMemoryAction(formData: FormData) {
     action: "memory.update",
     entityType: "memory",
     entityId: parsed.data.id,
-    payload: { fields: Object.keys(update).filter((k) => k !== "updatedAt") },
+    payload: auditPayload,
   });
 
   revalidatePath(`/memories/${parsed.data.id}`);
