@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { auth } from "@/auth";
 import { db } from "@/lib/db/client";
 import { memories, projects } from "@/lib/db/schema";
@@ -48,6 +48,15 @@ export default async function MemoryDetailPage({
 
   const isEditing = edit === "1";
 
+  const projectList = isEditing
+    ? await db
+        .select({ key: projects.key, displayName: projects.displayName })
+        .from(projects)
+        .where(eq(projects.userId, userId))
+        .orderBy(desc(projects.updatedAt))
+        .limit(50)
+    : [];
+
   return (
     <Container className="pt-6 max-w-3xl">
       <PageHeader
@@ -81,6 +90,40 @@ export default async function MemoryDetailPage({
           <CardBody>
             <form action={updateMemoryAction} className="space-y-4">
               <input type="hidden" name="id" value={m.id} />
+              <div>
+                <Label htmlFor="scope">Scope</Label>
+                <select
+                  id="scope"
+                  name="scope"
+                  defaultValue={m.scope}
+                  className="mt-1 h-9 px-2 rounded-md bg-surface-1 border border-border text-fg text-sm w-full"
+                >
+                  <option value="project">Project — attached to a project</option>
+                  <option value="user">User — global across all projects</option>
+                </select>
+              </div>
+              <div>
+                <Label htmlFor="project" hint="Required for project scope">
+                  Project key
+                </Label>
+                <Input
+                  id="project"
+                  name="project"
+                  defaultValue={m.projectKey ?? ""}
+                  placeholder="repo name, slug, or any stable string"
+                  list="project-list"
+                  className="mt-1"
+                />
+                {projectList.length > 0 ? (
+                  <datalist id="project-list">
+                    {projectList.map((p) => (
+                      <option key={p.key} value={p.key}>
+                        {p.displayName ?? p.key}
+                      </option>
+                    ))}
+                  </datalist>
+                ) : null}
+              </div>
               <div>
                 <Label htmlFor="content">Content</Label>
                 <Textarea

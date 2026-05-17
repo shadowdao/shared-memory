@@ -46,9 +46,25 @@ export const MemoryUpdateInput = z.object({
   id: z.string().uuid(),
   content: MemoryContent.optional(),
   tags: Tags.optional(),
-}).refine((v) => v.content !== undefined || v.tags !== undefined, {
-  message: "memory.update requires content or tags",
-});
+  scope: MemoryScope.optional(),
+  project: ProjectKey.optional(),
+})
+  .refine(
+    (v) =>
+      v.content !== undefined ||
+      v.tags !== undefined ||
+      v.scope !== undefined ||
+      v.project !== undefined,
+    { message: "memory.update requires content, tags, scope, or project" },
+  )
+  .refine(
+    (v) => v.scope !== "project" || (v.project !== undefined && v.project !== ""),
+    { message: "scope='project' requires a non-empty project key" },
+  )
+  .refine(
+    (v) => v.scope !== "user" || v.project === undefined || v.project === "",
+    { message: "scope='user' cannot have a project key" },
+  );
 export type MemoryUpdateInput = z.infer<typeof MemoryUpdateInput>;
 
 export const MemorySearchInput = z.object({
