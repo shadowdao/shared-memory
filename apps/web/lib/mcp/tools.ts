@@ -337,7 +337,7 @@ const memoryUpdate: ToolDef = {
       project: {
         type: "string",
         description:
-          "Project key the memory should attach to (required and only valid when scope='project'). Project is upserted if it doesn't exist.",
+          "Project key the memory should attach to (required and only valid when scope='project'). The project must already exist — call `project.identify` first if it doesn't.",
       },
     },
     required: ["id"],

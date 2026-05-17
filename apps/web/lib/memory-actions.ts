@@ -185,7 +185,10 @@ export async function updateMemoryAction(formData: FormData) {
     }
   }
 
-  await db.update(memories).set(update).where(eq(memories.id, parsed.data.id));
+  await db
+    .update(memories)
+    .set(update)
+    .where(and(eq(memories.id, parsed.data.id), eq(memories.userId, userId)));
 
   const auditFields = Object.keys(update).filter((k) => k !== "updatedAt");
   const auditPayload: Record<string, unknown> = { fields: auditFields };

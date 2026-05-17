@@ -156,7 +156,10 @@ export async function putSnippet(
       updatedAt: new Date(),
     };
     if (description !== undefined) updateValues.description = description;
-    await db.update(snippets).set(updateValues).where(eq(snippets.id, existing.id));
+    await db
+      .update(snippets)
+      .set(updateValues)
+      .where(and(eq(snippets.id, existing.id), eq(snippets.userId, userId)));
     const refreshed = await findSnippet(userId, name, scope, projectId);
     return { snippet: refreshed!, inserted: false };
   }

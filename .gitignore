@@ -42,3 +42,4 @@ coverage/
 # Local data volumes (if anyone bind-mounts under repo)
 data/
 postgres-data/
+.claude/

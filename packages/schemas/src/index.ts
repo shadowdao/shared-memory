@@ -61,10 +61,9 @@ export const MemoryUpdateInput = z.object({
     (v) => v.scope !== "project" || (v.project !== undefined && v.project !== ""),
     { message: "scope='project' requires a non-empty project key" },
   )
-  .refine(
-    (v) => v.scope !== "user" || v.project === undefined || v.project === "",
-    { message: "scope='user' cannot have a project key" },
-  );
+  .refine((v) => v.scope !== "user" || v.project === undefined, {
+    message: "scope='user' cannot have a project key",
+  });
 export type MemoryUpdateInput = z.infer<typeof MemoryUpdateInput>;
 
 export const MemorySearchInput = z.object({

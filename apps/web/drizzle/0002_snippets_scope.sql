@@ -35,5 +35,5 @@ CREATE UNIQUE INDEX "snippets_user_project_name_uq"
   ON "snippets" ("user_id", "project_id", "name")
   WHERE scope = 'project' AND deleted_at IS NULL;
 
-CREATE INDEX "snippets_user_idx"    ON "snippets" ("user_id");
-CREATE INDEX "snippets_project_idx" ON "snippets" ("project_id");
+CREATE INDEX IF NOT EXISTS "snippets_user_idx"    ON "snippets" ("user_id");
+CREATE INDEX IF NOT EXISTS "snippets_project_idx" ON "snippets" ("project_id");
