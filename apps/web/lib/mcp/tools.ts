@@ -8,9 +8,19 @@ import {
   MemoryUpdateInput,
   MemoryWriteInput,
   ProjectIdentifyInput,
+  SnippetPutInput,
+  SnippetGetInput,
+  SnippetListInput,
+  SnippetDeleteInput,
 } from "@shared-memory/schemas";
 import { embedText } from "@/lib/embedder";
 import { searchMemories } from "@/lib/memories";
+import {
+  getSnippet,
+  putSnippet,
+  listSnippets,
+  softDeleteSnippet,
+} from "@/lib/snippets";
 import type { UserContext } from "./context";
 
 /**
@@ -498,6 +508,236 @@ const memorySearch: ToolDef = {
   },
 };
 
+// ---------- snippet tools ----------
+
+const snippetPut: ToolDef = {
+  name: "snippet.put",
+  description:
+    "Save or update a named reusable artifact — a template, format, or checklist the user wants applied consistently. Call this when the user says 'remember this as my X template', 'save this format as Y', or 'use this checklist whenever I do Z'. Different from memory.write (which is for facts you'll later search): snippets are fetched by EXACT name, not searched, so the name is the contract — pick something stable and predictable (e.g. 'pr-description-format', 'commit-msg-rules', 'code-review-checklist'). Use scope='user' (default) for personal templates that apply everywhere; scope='project' for repo-specific variants (requires `project`, same key you used for project.identify). Re-calling with the same name+scope replaces the body in place — there is no separate update tool. Tags help browsing in the Web UI; they do NOT enable search.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: {
+        type: "string",
+        description:
+          "Stable identifier for this snippet (1–200 chars; alphanumerics + ._-/). Used as the lookup key — pick something you'll remember.",
+      },
+      body: {
+        type: "string",
+        description: "The full template / format / checklist body (1–64,000 chars).",
+      },
+      description: {
+        type: "string",
+        description: "Optional short note on when to use this snippet.",
+      },
+      scope: {
+        type: "string",
+        enum: ["project", "user"],
+        description:
+          "'user' (default) = applies everywhere. 'project' = tied to one repo and requires `project`.",
+      },
+      project: {
+        type: "string",
+        description: "Project key (required when scope='project').",
+      },
+      tags: {
+        type: "array",
+        items: { type: "string" },
+        description: "Optional tags for grouping in the Web UI.",
+      },
+    },
+    required: ["name", "body"],
+  },
+  async handler(args, ctx) {
+    const parsed = SnippetPutInput.safeParse(args);
+    if (!parsed.success) return err(parsed.error.message);
+
+    if (parsed.data.scope === "project") {
+      const exists = await resolveProjectId(ctx, parsed.data.project!);
+      if (!exists) {
+        return err(
+          `unknown project '${parsed.data.project}'; call project.identify first`,
+        );
+      }
+    }
+
+    const { snippet, inserted } = await putSnippet(ctx.userId, {
+      name: parsed.data.name,
+      body: parsed.data.body,
+      description: parsed.data.description,
+      tags: parsed.data.tags,
+      scope: parsed.data.scope,
+      projectKey: parsed.data.project,
+    });
+
+    await db.insert(auditLog).values({
+      userId: ctx.userId,
+      actor: "mcp",
+      action: inserted ? "snippet.put" : "snippet.update",
+      entityType: "snippet",
+      entityId: snippet.id,
+      payload: {
+        name: snippet.name,
+        scope: snippet.scope,
+        projectKey: snippet.projectKey,
+        tags: snippet.tags,
+      },
+    });
+
+    return ok(
+      {
+        id: snippet.id,
+        name: snippet.name,
+        scope: snippet.scope,
+        project: snippet.projectKey,
+        inserted,
+      },
+      `${inserted ? "wrote" : "updated"} snippet '${snippet.name}' (${snippet.scope})`,
+    );
+  },
+};
+
+const snippetGet: ToolDef = {
+  name: "snippet.get",
+  description:
+    "Fetch a snippet by its EXACT name. Call this when the user references something by a stable label — 'use my pr-description-format', 'apply the commit-msg-rules', 'follow the code-review-checklist'. Different from memory.search/memory.get: snippets are addressed by name, not UUID, and there is no fuzzy matching — the name must match exactly. If you provide `project` alone (no `scope`), the server prefers the project-scope variant for that repo and falls back to the user-scope default. Pass scope='user' to force the global version even when a project variant exists.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Exact snippet name." },
+      scope: {
+        type: "string",
+        enum: ["project", "user"],
+        description:
+          "Force a specific scope. Omit to prefer the project variant (if `project` is given), else user.",
+      },
+      project: {
+        type: "string",
+        description:
+          "Project key. Required for scope='project'; optional otherwise (enables project-preferred lookup).",
+      },
+    },
+    required: ["name"],
+  },
+  async handler(args, ctx) {
+    const parsed = SnippetGetInput.safeParse(args);
+    if (!parsed.success) return err(parsed.error.message);
+
+    const snippet = await getSnippet(ctx.userId, {
+      name: parsed.data.name,
+      scope: parsed.data.scope,
+      projectKey: parsed.data.project,
+    });
+
+    if (!snippet) return err(`snippet '${parsed.data.name}' not found`);
+
+    return ok(
+      {
+        id: snippet.id,
+        name: snippet.name,
+        body: snippet.body,
+        description: snippet.description,
+        scope: snippet.scope,
+        project: snippet.projectKey,
+        tags: snippet.tags,
+        createdAt: snippet.createdAt,
+        updatedAt: snippet.updatedAt,
+      },
+      `snippet '${snippet.name}' (${snippet.scope})`,
+    );
+  },
+};
+
+const snippetList: ToolDef = {
+  name: "snippet.list",
+  description:
+    "Browse this user's snippets — useful at session start to see what templates are available before deciding whether to call snippet.get. Unlike memory.list, snippets are sorted by recency of update (they're meant to evolve over time). Filter by scope, project, or tags. Use this when you suspect a relevant template exists but you don't know the exact name; if you DO know the name, call snippet.get directly.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      project: {
+        type: "string",
+        description: "Filter by project key (returns only project-scope snippets for that project).",
+      },
+      scope: { type: "string", enum: ["project", "user"], description: "Filter by scope." },
+      tags: {
+        type: "array",
+        items: { type: "string" },
+        description: "Require all of these tags.",
+      },
+      limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+    },
+  },
+  async handler(args, ctx) {
+    const parsed = SnippetListInput.safeParse(args);
+    if (!parsed.success) return err(parsed.error.message);
+
+    const rows = await listSnippets(ctx.userId, {
+      scope: parsed.data.scope,
+      projectKey: parsed.data.project,
+      tags: parsed.data.tags,
+      limit: parsed.data.limit,
+    });
+
+    const items = rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      description: r.description,
+      scope: r.scope,
+      project: r.projectKey,
+      tags: r.tags,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    }));
+
+    return ok({ items }, `${items.length} snippet(s)`);
+  },
+};
+
+const snippetDelete: ToolDef = {
+  name: "snippet.delete",
+  description:
+    "Soft-delete a snippet by name when it becomes stale or wrong — e.g., the user revamps a template and the old version shouldn't be reachable anymore. ALWAYS prefer snippet.put with the same name (which replaces in place) over delete-then-put when you're just refining the body. Only delete when the snippet genuinely shouldn't exist. Provide `scope` (and `project` for project-scope) to disambiguate when the same name exists in multiple scopes.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Exact snippet name." },
+      scope: { type: "string", enum: ["project", "user"] },
+      project: { type: "string", description: "Project key (required for scope='project')." },
+    },
+    required: ["name"],
+  },
+  async handler(args, ctx) {
+    const parsed = SnippetDeleteInput.safeParse(args);
+    if (!parsed.success) return err(parsed.error.message);
+
+    const deleted = await softDeleteSnippet(ctx.userId, {
+      name: parsed.data.name,
+      scope: parsed.data.scope,
+      projectKey: parsed.data.project,
+    });
+    if (!deleted) return err(`snippet '${parsed.data.name}' not found`);
+
+    await db.insert(auditLog).values({
+      userId: ctx.userId,
+      actor: "mcp",
+      action: "snippet.delete",
+      entityType: "snippet",
+      entityId: deleted.id,
+      payload: {
+        name: parsed.data.name,
+        scope: deleted.scope,
+        projectKey: deleted.projectKey,
+      },
+    });
+
+    return ok(
+      { id: deleted.id, name: parsed.data.name, deleted: true },
+      `deleted snippet '${parsed.data.name}' (${deleted.scope})`,
+    );
+  },
+};
+
 export const tools: ToolDef[] = [
   projectIdentify,
   memoryWrite,
@@ -506,6 +746,10 @@ export const tools: ToolDef[] = [
   memoryGet,
   memorySearch,
   memoryDelete,
+  snippetPut,
+  snippetGet,
+  snippetList,
+  snippetDelete,
 ];
 
 export const toolMap: Record<string, ToolDef> = Object.fromEntries(

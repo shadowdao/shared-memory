@@ -18,6 +18,7 @@ export function Nav({ user }: { user: Session["user"] }) {
 
         <nav className="hidden md:flex items-center gap-1 ml-2">
           <NavLink href="/memories">Memories</NavLink>
+          <NavLink href="/snippets">Snippets</NavLink>
           <NavLink href="/projects">Projects</NavLink>
           <NavLink href="/settings">Settings</NavLink>
         </nav>

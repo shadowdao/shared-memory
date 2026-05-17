@@ -114,15 +114,22 @@ export const snippets = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
+    // NULL when scope = 'user' (global to the user). Mirrors `memories`.
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    scope: memoryScope("scope").notNull().default("user"),
     name: varchar("name", { length: 200 }).notNull(),
     body: text("body").notNull(),
     description: text("description"),
     tags: textArray("tags").notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
   },
   (t) => ({
-    uniqueUserName: uniqueIndex("snippets_user_name_uq").on(t.userId, t.name),
+    userIdx: index("snippets_user_idx").on(t.userId),
+    projectIdx: index("snippets_project_idx").on(t.projectId),
+    // Partial unique indexes (one per scope, live rows only) are declared
+    // in the SQL migration since drizzle-kit doesn't model partial indexes.
   }),
 );
 
