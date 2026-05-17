@@ -8,6 +8,12 @@ import type { AuthenticatedClaims } from "@/lib/auth/jwt";
  *
  * Resolves (or creates) the internal `users` row from the OIDC claims so
  * tools work with stable UUID foreign keys rather than raw `sub` strings.
+ *
+ * `groups` and `defaultProjectKey` are populated here from the inbound
+ * request: groups come from the JWT's `groups` claim (live) with a DB
+ * fallback for CLI tokens that carry no claim; defaultProjectKey is the
+ * `X-Project-Key` header (already Zod-validated at the route boundary),
+ * used as a fallback when a tool call omits `project`.
  */
 export interface UserContext {
   /** Internal users.id UUID. */
@@ -85,8 +91,7 @@ export async function userContextFromClaims(
   // emit it). CLI tokens never do — they go through verifyCliToken which
   // doesn't set claims.groups. In that case fall back to the DB snapshot
   // from the user's last interactive sign-in.
-  const groupNames =
-    claims.groups ?? (await loadUserGroups(userId));
+  const groupNames = claims.groups ?? (await loadUserGroups(userId));
 
   return {
     userId,

@@ -6,6 +6,11 @@ export type MemoryScope = z.infer<typeof MemoryScope>;
 export const MemoryVisibility = z.enum(["private", "shared", "team"]);
 export type MemoryVisibility = z.infer<typeof MemoryVisibility>;
 
+// Access level a group has on a shared project. Mirrors the Postgres
+// `memory_access` enum defined by Agent A's groups migration.
+export const MemoryAccess = z.enum(["ro", "rw"]);
+export type MemoryAccess = z.infer<typeof MemoryAccess>;
+
 export const ProjectKey = z
   .string()
   .min(1)
@@ -48,6 +53,10 @@ export const MemoryUpdateInput = z.object({
   tags: Tags.optional(),
   scope: MemoryScope.optional(),
   project: ProjectKey.optional(),
+  // Optimistic-locking token returned by memory.get / memory.list. When
+  // present, the UPDATE matches on (id, version); a 0-row result means
+  // someone else edited this memory since you read it.
+  version: z.number().int().nonnegative().optional(),
 })
   .refine(
     (v) =>
@@ -123,6 +132,9 @@ export const SnippetPutInput = z
     tags: Tags.optional(),
     scope: MemoryScope.default("user"),
     project: ProjectKey.optional(),
+    // Optimistic-locking token used on the update path (when a row with
+    // this name+scope+project already exists). Ignored on first put.
+    version: z.number().int().nonnegative().optional(),
   })
   .refine(scopeProjectRefinement.check, { message: scopeProjectRefinement.message });
 export type SnippetPutInput = z.infer<typeof SnippetPutInput>;

@@ -1,9 +1,10 @@
 import Link from "next/link";
-import { and, desc, eq, isNull, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, inArray, or, sql } from "drizzle-orm";
 import { auth } from "@/auth";
 import { db } from "@/lib/db/client";
-import { memories, projects } from "@/lib/db/schema";
+import { memories, projects, projectShares } from "@/lib/db/schema";
 import { searchMemories } from "@/lib/memories";
+import { getUserGroupNames, readableProjectIds } from "@/lib/access";
 import { Container, PageHeader } from "@/app/_components/ui/container";
 import { Card, CardBody } from "@/app/_components/ui/card";
 import { Badge } from "@/app/_components/ui/badge";
@@ -18,15 +19,16 @@ type Scope = "project" | "user";
 interface MemoryRow {
   id: string;
   scope: "project" | "user";
+  projectId: string | null;
   projectKey: string | null;
   content: string;
   tags: string[];
   createdAt: Date;
   rank?: { rrfScore: number; vectorRank: number | null; ftsRank: number | null; tagRank: number | null };
+  shared?: boolean;
 }
 
 async function fetchMemoriesByIds(
-  userId: string,
   ids: string[],
 ): Promise<Map<string, MemoryRow>> {
   if (ids.length === 0) return new Map();
@@ -37,22 +39,39 @@ async function fetchMemoriesByIds(
       content: memories.content,
       tags: memories.tags,
       createdAt: memories.createdAt,
+      projectId: memories.projectId,
       projectKey: projects.key,
     })
     .from(memories)
     .leftJoin(projects, eq(memories.projectId, projects.id))
-    .where(and(eq(memories.userId, userId), inArray(memories.id, ids), isNull(memories.deletedAt)));
+    .where(and(inArray(memories.id, ids), isNull(memories.deletedAt)));
   return new Map(rows.map((r) => [r.id, r as MemoryRow]));
 }
 
-async function listRecent(userId: string, scope?: Scope, project?: string): Promise<MemoryRow[]> {
-  const filters = [eq(memories.userId, userId), isNull(memories.deletedAt)];
+async function listRecent(
+  userId: string,
+  groupNames: string[],
+  scope?: Scope,
+  project?: string,
+): Promise<MemoryRow[]> {
+  // Visibility: own rows OR rows in an accessible project.
+  const accessibleIds = await readableProjectIds(userId, groupNames);
+  const visibility =
+    accessibleIds.length > 0
+      ? or(eq(memories.userId, userId), inArray(memories.projectId, accessibleIds))
+      : eq(memories.userId, userId);
+  const filters = [visibility!, isNull(memories.deletedAt)];
   if (scope) filters.push(eq(memories.scope, scope));
   if (project) {
+    // Project filter — match the project key against any project the
+    // user can read (owned or shared). When the key matches none of
+    // those, return empty.
     filters.push(
-      sql`${memories.projectId} = (
+      sql`${memories.projectId} IN (
         SELECT id FROM ${projects}
-        WHERE ${projects.userId} = ${userId} AND ${projects.key} = ${project}
+        WHERE ${projects.key} = ${project}
+          AND (${projects.userId} = ${userId}
+               OR ${projects.id} = ANY(${accessibleIds}::uuid[]))
       )`,
     );
   }
@@ -63,6 +82,7 @@ async function listRecent(userId: string, scope?: Scope, project?: string): Prom
       content: memories.content,
       tags: memories.tags,
       createdAt: memories.createdAt,
+      projectId: memories.projectId,
       projectKey: projects.key,
     })
     .from(memories)
@@ -73,6 +93,20 @@ async function listRecent(userId: string, scope?: Scope, project?: string): Prom
   return rows;
 }
 
+/**
+ * Lookup which projects in `projectIds` have any share rows. Used so
+ * we can show a "Shared" chip per memory card. One query covers every
+ * row on the page; per-row inspection would be N+1 here.
+ */
+async function sharedProjectSet(projectIds: string[]): Promise<Set<string>> {
+  if (projectIds.length === 0) return new Set();
+  const rows = await db
+    .selectDistinct({ projectId: projectShares.projectId })
+    .from(projectShares)
+    .where(inArray(projectShares.projectId, projectIds));
+  return new Set(rows.map((r) => r.projectId));
+}
+
 export default async function MemoriesPage({
   searchParams,
 }: {
@@ -80,6 +114,7 @@ export default async function MemoriesPage({
 }) {
   const session = await auth();
   const userId = session!.user.id;
+  const groupNames = await getUserGroupNames(userId);
   const params = await searchParams;
   const q = params.q?.trim() || undefined;
   const scope = params.scope === "user" || params.scope === "project" ? params.scope : undefined;
@@ -89,17 +124,34 @@ export default async function MemoriesPage({
   let debug: { vec: number; fts: number; tag: number } | null = null;
 
   if (q) {
-    const result = await searchMemories(userId, q, { scope, projectKey: project }, 30);
+    const result = await searchMemories(
+      userId,
+      q,
+      { scope, projectKey: project, groupNames },
+      30,
+    );
     const ids = result.hits.map((h) => h.id);
-    const byId = await fetchMemoriesByIds(userId, ids);
+    const byId = await fetchMemoriesByIds(ids);
     rows = result.hits.flatMap((h) => {
       const r = byId.get(h.id);
       return r ? [{ ...r, rank: h.rank }] : [];
     });
     debug = result.debug;
   } else {
-    rows = await listRecent(userId, scope, project);
+    rows = await listRecent(userId, groupNames, scope, project);
   }
+
+  // Annotate which rows belong to projects that have any active share.
+  // Done in a single query so the listing stays O(1) DB calls regardless
+  // of page size.
+  const projectIds = rows
+    .map((r) => r.projectId)
+    .filter((p): p is string => p !== null);
+  const sharedProjects = await sharedProjectSet(projectIds);
+  rows = rows.map((r) => ({
+    ...r,
+    shared: r.projectId ? sharedProjects.has(r.projectId) : false,
+  }));
 
   return (
     <Container className="pt-6">
@@ -168,6 +220,11 @@ export default async function MemoriesPage({
                       <Badge tone={m.scope === "user" ? "accent" : "neutral"}>
                         {m.scope}
                       </Badge>
+                      {m.shared ? (
+                        <Badge tone="accent" title="Shared with one or more groups">
+                          Shared
+                        </Badge>
+                      ) : null}
                       {m.projectKey ? (
                         <span className="font-mono">· {m.projectKey}</span>
                       ) : null}

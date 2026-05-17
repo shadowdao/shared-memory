@@ -1,8 +1,9 @@
 import Link from "next/link";
-import { and, desc, eq, isNull, sql, count } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql, count } from "drizzle-orm";
 import { auth } from "@/auth";
 import { db } from "@/lib/db/client";
-import { memories, projects } from "@/lib/db/schema";
+import { memories, projects, projectShares } from "@/lib/db/schema";
+import { getUserGroupNames, readableProjectIds } from "@/lib/access";
 import { Container, PageHeader } from "@/app/_components/ui/container";
 import { Card, CardBody, CardHeader } from "@/app/_components/ui/card";
 import { Badge } from "@/app/_components/ui/badge";
@@ -14,14 +15,27 @@ export const dynamic = "force-dynamic";
 export default async function DashboardPage() {
   const session = await auth();
   const userId = session!.user.id;
+  const groupNames = await getUserGroupNames(userId);
 
+  // Visibility widening — recent + counts include memories under
+  // projects shared with the user's groups.
+  const accessibleIds = await readableProjectIds(userId, groupNames);
+  const visibility =
+    accessibleIds.length > 0
+      ? or(eq(memories.userId, userId), inArray(memories.projectId, accessibleIds))
+      : eq(memories.userId, userId);
+
+  // Dashboard's "Projects" card stays owned-only — the list of projects
+  // you actively own. Shared projects show up via the memory list and
+  // the per-project page; surfacing them here would make the panel
+  // confusing about who owns what.
   const [counts, recent, topProjects] = await Promise.all([
     db
       .select({
         total: count(memories.id),
       })
       .from(memories)
-      .where(and(eq(memories.userId, userId), isNull(memories.deletedAt))),
+      .where(and(visibility!, isNull(memories.deletedAt))),
     db
       .select({
         id: memories.id,
@@ -29,11 +43,12 @@ export default async function DashboardPage() {
         scope: memories.scope,
         tags: memories.tags,
         createdAt: memories.createdAt,
+        projectId: memories.projectId,
         projectKey: projects.key,
       })
       .from(memories)
       .leftJoin(projects, eq(memories.projectId, projects.id))
-      .where(and(eq(memories.userId, userId), isNull(memories.deletedAt)))
+      .where(and(visibility!, isNull(memories.deletedAt)))
       .orderBy(desc(memories.createdAt))
       .limit(5),
     db
@@ -53,6 +68,22 @@ export default async function DashboardPage() {
       .orderBy(desc(sql`count(${memories.id})`))
       .limit(4),
   ]);
+
+  // Annotate "Shared" chips on the recent panel.
+  const projectIds = recent
+    .map((r) => r.projectId)
+    .filter((p): p is string => p !== null);
+  const sharedProjects =
+    projectIds.length > 0
+      ? new Set(
+          (
+            await db
+              .selectDistinct({ projectId: projectShares.projectId })
+              .from(projectShares)
+              .where(inArray(projectShares.projectId, projectIds))
+          ).map((r) => r.projectId),
+        )
+      : new Set<string>();
 
   const memoryTotal = counts[0]?.total ?? 0;
 
@@ -94,6 +125,11 @@ export default async function DashboardPage() {
                       <Badge tone={m.scope === "user" ? "accent" : "neutral"}>
                         {m.scope}
                       </Badge>
+                      {m.projectId && sharedProjects.has(m.projectId) ? (
+                        <Badge tone="accent" title="Shared with one or more groups">
+                          Shared
+                        </Badge>
+                      ) : null}
                       {m.projectKey ? <span>· {m.projectKey}</span> : null}
                       <span className="ml-auto">
                         {new Date(m.createdAt).toLocaleDateString()}

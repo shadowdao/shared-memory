@@ -11,6 +11,7 @@ import {
   customType,
   vector,
   varchar,
+  integer,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -38,9 +39,8 @@ const textArray = customType<{ data: string[]; driverData: string }>({
 export const memoryScope = pgEnum("memory_scope", ["project", "user"]);
 export const memoryVisibility = pgEnum("memory_visibility", ["private", "shared", "team"]);
 export const auditActor = pgEnum("audit_actor", ["mcp", "web", "system"]);
-// Reserved here so 0003 (this file's matching migration) owns it. Used
-// by Agent B's upcoming `project_shares` table to express RO vs RW
-// grants per shared group.
+// Created by 0003_groups.sql; declared here so the TS layer (notably
+// `project_shares`) can reference it as a typed pgEnum.
 export const memoryAccess = pgEnum("memory_access", ["ro", "rw"]);
 
 // ---------- tables ----------
@@ -49,7 +49,7 @@ export const users = pgTable(
   "users",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    // OIDC `sub` claim from Authentik — stable identifier for this user.
+    // OIDC `sub` claim from the IdP — stable identifier for this user.
     oidcSub: text("oidc_sub").notNull(),
     // OIDC `iss` so we can disambiguate if we ever federate.
     oidcIss: text("oidc_iss").notNull(),
@@ -99,6 +99,14 @@ export const memories = pgTable(
     embedding: vector("embedding", { dimensions: 384 }),
     // Generated column — see migration SQL for definition.
     contentTsv: tsvector("content_tsv"),
+    // Optimistic-locking counter. Bumped on every successful UPDATE so
+    // concurrent edits (now possible across shared-project members) can
+    // detect lost-write situations and surface "refresh and try again".
+    version: integer("version").notNull().default(1),
+    // The user whose UPDATE most recently mutated this row. NULL only on
+    // the very first INSERT (pre-update). FK is `SET NULL` so deleting
+    // an account doesn't wipe other people's memories.
+    lastEditedBy: uuid("last_edited_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
@@ -126,6 +134,10 @@ export const snippets = pgTable(
     body: text("body").notNull(),
     description: text("description"),
     tags: textArray("tags").notNull().default([]),
+    // See `memories.version` / `memories.lastEditedBy` — co-edit primitive
+    // for snippets in shared projects.
+    version: integer("version").notNull().default(1),
+    lastEditedBy: uuid("last_edited_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
@@ -157,6 +169,14 @@ export const cliTokens = pgTable(
   }),
 );
 
+// ---------- groups + sharing ----------
+//
+// `groups` and `user_groups` come from `0003_groups.sql`; `project_shares`
+// comes from `0004_project_shares.sql`. Drizzle declarations here let
+// authorization helpers and the share-management UI import everything
+// through `@/lib/db/schema`. Column shape MUST stay in lockstep with the
+// migrations.
+
 export const groups = pgTable(
   "groups",
   {
@@ -164,9 +184,8 @@ export const groups = pgTable(
     // OIDC issuer this group originates from — pairs with `name` so two
     // IdPs can both have a "platform" group without collision.
     oidcIss: text("oidc_iss").notNull(),
+    // Group `name` as it appears in the JWT (Authentik / EntraID groups claim).
     name: text("name").notNull(),
-    // Optional human-friendly label. Most IdPs only emit names, so this
-    // is usually NULL; reserved for future enrichment.
     displayName: text("display_name"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -191,6 +210,34 @@ export const userGroups = pgTable(
   (t) => ({
     pk: primaryKey({ columns: [t.userId, t.groupId] }),
     userIdx: index("user_groups_user_idx").on(t.userId),
+    groupIdx: index("user_groups_group_idx").on(t.groupId),
+  }),
+);
+
+// `project_shares` grants a `group` access to a `project`. Each row
+// authorizes every user in that group to read (and, when access='rw',
+// write) every memory + snippet under that project.
+//
+// Owners share projects from the Web UI; the MCP layer can resolve
+// shared projects via project.identify but cannot grant new shares.
+export const projectShares = pgTable(
+  "project_shares",
+  {
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    access: memoryAccess("access").notNull(),
+    grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
+    // Audit-friendly. `SET NULL` so deleting the granter's account doesn't
+    // cascade-remove the share.
+    grantedBy: uuid("granted_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.projectId, t.groupId] }),
+    groupIdx: index("project_shares_group_idx").on(t.groupId),
   }),
 );
 
@@ -234,3 +281,5 @@ export type Group = typeof groups.$inferSelect;
 export type NewGroup = typeof groups.$inferInsert;
 export type UserGroup = typeof userGroups.$inferSelect;
 export type NewUserGroup = typeof userGroups.$inferInsert;
+export type ProjectShare = typeof projectShares.$inferSelect;
+export type NewProjectShare = typeof projectShares.$inferInsert;
