@@ -73,6 +73,42 @@ async function resolveProjectId(
   return row[0]?.id ?? null;
 }
 
+/**
+ * If the args object has no explicit `project` key, inject the request-
+ * scoped `defaultProjectKey` from the `X-Project-Key` header (when set).
+ * This lets a client pin every call to one project without restating it
+ * per tool invocation. Returns a new object — the original is untouched.
+ *
+ * The injection rule is: inject when the caller plausibly intends a
+ * project scope. Concretely we inject when EITHER:
+ *
+ *   * `scope` is explicitly `'project'`, OR
+ *   * `scope` is omitted AND the tool's natural default IS project-scope
+ *     (memory.write defaults to project; snippet.put defaults to user).
+ *
+ * We never inject when `scope === 'user'` is explicit — the schemas refine
+ * `(scope='user', project=<anything>)` as invalid. An explicit `project`
+ * argument always wins and we never overwrite it.
+ *
+ * `defaultScope` is the tool's own default (e.g. 'project' for memory.*,
+ * 'user' for snippet.*). For filter tools that have no scope default
+ * (memory.list, memory.search, snippet.list), pass 'project' — those
+ * cases treat the header as a project filter and benefit from injection.
+ */
+function withDefaultProject(
+  args: unknown,
+  ctx: UserContext,
+  defaultScope: "project" | "user" = "project",
+): unknown {
+  if (!ctx.defaultProjectKey) return args;
+  if (args === null || typeof args !== "object" || Array.isArray(args)) return args;
+  const obj = args as Record<string, unknown>;
+  if (obj.project !== undefined) return args;
+  if (obj.scope === "user") return args;
+  if (obj.scope === undefined && defaultScope === "user") return args;
+  return { ...obj, project: ctx.defaultProjectKey };
+}
+
 // ---------- tools ----------
 
 const projectIdentify: ToolDef = {
@@ -150,7 +186,7 @@ const memoryWrite: ToolDef = {
     required: ["content"],
   },
   async handler(args, ctx) {
-    const parsed = MemoryWriteInput.safeParse(args);
+    const parsed = MemoryWriteInput.safeParse(withDefaultProject(args, ctx));
     if (!parsed.success) return err(parsed.error.message);
 
     const scope = parsed.data.scope;
@@ -213,7 +249,7 @@ const memoryList: ToolDef = {
     },
   },
   async handler(args, ctx) {
-    const parsed = MemoryListInput.safeParse(args);
+    const parsed = MemoryListInput.safeParse(withDefaultProject(args, ctx));
     if (!parsed.success) return err(parsed.error.message);
 
     const where = [eq(memories.userId, ctx.userId), isNull(memories.deletedAt)];
@@ -343,7 +379,7 @@ const memoryUpdate: ToolDef = {
     required: ["id"],
   },
   async handler(args, ctx) {
-    const parsed = MemoryUpdateInput.safeParse(args);
+    const parsed = MemoryUpdateInput.safeParse(withDefaultProject(args, ctx));
     if (!parsed.success) return err(parsed.error.message);
 
     const existingRows = await db
@@ -456,7 +492,7 @@ const memorySearch: ToolDef = {
     required: ["query"],
   },
   async handler(args, ctx) {
-    const parsed = MemorySearchInput.safeParse(args);
+    const parsed = MemorySearchInput.safeParse(withDefaultProject(args, ctx));
     if (!parsed.success) return err(parsed.error.message);
 
     const { query, scope, tags, limit } = parsed.data;
@@ -549,7 +585,9 @@ const snippetPut: ToolDef = {
     required: ["name", "body"],
   },
   async handler(args, ctx) {
-    const parsed = SnippetPutInput.safeParse(args);
+    // snippet.put defaults to user-scope, so a header-supplied project key
+    // is only honored when the caller explicitly says `scope='project'`.
+    const parsed = SnippetPutInput.safeParse(withDefaultProject(args, ctx, "user"));
     if (!parsed.success) return err(parsed.error.message);
 
     if (parsed.data.scope === "project") {
@@ -620,7 +658,7 @@ const snippetGet: ToolDef = {
     required: ["name"],
   },
   async handler(args, ctx) {
-    const parsed = SnippetGetInput.safeParse(args);
+    const parsed = SnippetGetInput.safeParse(withDefaultProject(args, ctx));
     if (!parsed.success) return err(parsed.error.message);
 
     const snippet = await getSnippet(ctx.userId, {
@@ -669,7 +707,7 @@ const snippetList: ToolDef = {
     },
   },
   async handler(args, ctx) {
-    const parsed = SnippetListInput.safeParse(args);
+    const parsed = SnippetListInput.safeParse(withDefaultProject(args, ctx));
     if (!parsed.success) return err(parsed.error.message);
 
     const rows = await listSnippets(ctx.userId, {
@@ -708,7 +746,7 @@ const snippetDelete: ToolDef = {
     required: ["name"],
   },
   async handler(args, ctx) {
-    const parsed = SnippetDeleteInput.safeParse(args);
+    const parsed = SnippetDeleteInput.safeParse(withDefaultProject(args, ctx));
     if (!parsed.success) return err(parsed.error.message);
 
     const deleted = await softDeleteSnippet(ctx.userId, {

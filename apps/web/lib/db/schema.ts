@@ -7,6 +7,7 @@ import {
   jsonb,
   uniqueIndex,
   index,
+  primaryKey,
   customType,
   vector,
   varchar,
@@ -37,6 +38,10 @@ const textArray = customType<{ data: string[]; driverData: string }>({
 export const memoryScope = pgEnum("memory_scope", ["project", "user"]);
 export const memoryVisibility = pgEnum("memory_visibility", ["private", "shared", "team"]);
 export const auditActor = pgEnum("audit_actor", ["mcp", "web", "system"]);
+// Reserved here so 0003 (this file's matching migration) owns it. Used
+// by Agent B's upcoming `project_shares` table to express RO vs RW
+// grants per shared group.
+export const memoryAccess = pgEnum("memory_access", ["ro", "rw"]);
 
 // ---------- tables ----------
 
@@ -152,6 +157,43 @@ export const cliTokens = pgTable(
   }),
 );
 
+export const groups = pgTable(
+  "groups",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // OIDC issuer this group originates from — pairs with `name` so two
+    // IdPs can both have a "platform" group without collision.
+    oidcIss: text("oidc_iss").notNull(),
+    name: text("name").notNull(),
+    // Optional human-friendly label. Most IdPs only emit names, so this
+    // is usually NULL; reserved for future enrichment.
+    displayName: text("display_name"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    uniqueIssName: uniqueIndex("groups_iss_name_uq").on(t.oidcIss, t.name),
+  }),
+);
+
+export const userGroups = pgTable(
+  "user_groups",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    // Refreshed on every sign-in that re-observes this membership.
+    syncedAt: timestamp("synced_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.userId, t.groupId] }),
+    userIdx: index("user_groups_user_idx").on(t.userId),
+  }),
+);
+
 export const auditLog = pgTable(
   "audit_log",
   {
@@ -188,3 +230,7 @@ export type CliToken = typeof cliTokens.$inferSelect;
 export type NewCliToken = typeof cliTokens.$inferInsert;
 export type AuditEntry = typeof auditLog.$inferSelect;
 export type NewAuditEntry = typeof auditLog.$inferInsert;
+export type Group = typeof groups.$inferSelect;
+export type NewGroup = typeof groups.$inferInsert;
+export type UserGroup = typeof userGroups.$inferSelect;
+export type NewUserGroup = typeof userGroups.$inferInsert;

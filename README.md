@@ -373,6 +373,15 @@ The OIDC client you use locally must accept
   testing to avoid hitting the production rate limit.
 - **`pg_isready` healthcheck loops** — check that `POSTGRES_USER` /
   `POSTGRES_PASSWORD` / `POSTGRES_DB` are all set in `.env`.
+- **`/settings/groups` is empty even though I'm in groups** — your IdP isn't
+  emitting a `groups` claim. On Authentik, edit the OIDC provider and add
+  the built-in `authentik default OAuth Mapping: OpenID 'profile'` (or a
+  custom property mapping that returns `{"groups": [g.name for g in
+  request.user.ak_groups.all()]}`), then sign out and back in. On EntraID,
+  add a "groups" optional claim under **Token configuration → Optional
+  claims**; tick "Emit groups as group names" if you want names (we treat
+  GUIDs as opaque strings). Keycloak: add a Group Membership mapper with
+  "Full group path" off and the token claim name `groups`.
 
 ---
 

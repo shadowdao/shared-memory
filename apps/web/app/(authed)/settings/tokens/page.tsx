@@ -1,28 +1,67 @@
 import { revalidatePath } from "next/cache";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, isNull } from "drizzle-orm";
 import { auth } from "@/auth";
 import { db } from "@/lib/db/client";
-import { cliTokens, users } from "@/lib/db/schema";
+import { cliTokens, projects, users } from "@/lib/db/schema";
 import {
   mintCliToken,
   revokeCliToken,
   CLI_TOKEN_TTL_SECONDS,
 } from "@/lib/auth/cli-token";
+import { ProjectKey } from "@shared-memory/schemas";
 import { Container, PageHeader } from "@/app/_components/ui/container";
 import { Card, CardBody, CardHeader } from "@/app/_components/ui/card";
 import { Badge } from "@/app/_components/ui/badge";
 import { EmptyState } from "@/app/_components/ui/empty-state";
-import TokensManager from "./tokens-manager";
+import TokensManager, { type CreateTokenState } from "./tokens-manager";
 
 export const dynamic = "force-dynamic";
 
-async function createTokenAction(_prev: { token: string | null; error: string | null }, formData: FormData): Promise<{ token: string | null; error: string | null }> {
+async function createTokenAction(
+  _prev: CreateTokenState,
+  formData: FormData,
+): Promise<CreateTokenState> {
   "use server";
   try {
     const session = await auth();
-    if (!session?.user?.id) return { token: null, error: "not authenticated" };
+    if (!session?.user?.id) {
+      return { token: null, error: "not authenticated", projectKey: null };
+    }
 
     const name = String(formData.get("name") ?? "").trim() || `Token ${new Date().toISOString().slice(0, 10)}`;
+
+    // Optional pin-to-project. The token JWT itself does NOT need a project
+    // claim — pinning is purely a UX shortcut so the generated `claude mcp
+    // add` snippet bakes in `X-Project-Key: <key>` and every call from
+    // that client lands on the right project by default.
+    const rawProject = String(formData.get("projectKey") ?? "").trim();
+    let projectKey: string | null = null;
+    if (rawProject.length > 0) {
+      const parsed = ProjectKey.safeParse(rawProject);
+      if (!parsed.success) {
+        return {
+          token: null,
+          error: `invalid project key: ${parsed.error.issues.map((i) => i.message).join("; ")}`,
+          projectKey: null,
+        };
+      }
+      // Cross-check the project belongs to this user (defense in depth —
+      // the dropdown is built from the user's projects, but the form is
+      // re-submittable so don't trust the value).
+      const found = await db
+        .select({ key: projects.key })
+        .from(projects)
+        .where(and(eq(projects.userId, session.user.id), eq(projects.key, parsed.data)))
+        .limit(1);
+      if (!found[0]) {
+        return {
+          token: null,
+          error: `unknown project '${parsed.data}'`,
+          projectKey: null,
+        };
+      }
+      projectKey = found[0].key;
+    }
 
     const userRow = await db
       .select({
@@ -35,7 +74,7 @@ async function createTokenAction(_prev: { token: string | null; error: string | 
       .where(eq(users.id, session.user.id))
       .limit(1);
     const u = userRow[0];
-    if (!u) return { token: null, error: "user row not found" };
+    if (!u) return { token: null, error: "user row not found", projectKey: null };
 
     const minted = await mintCliToken(
       {
@@ -49,9 +88,13 @@ async function createTokenAction(_prev: { token: string | null; error: string | 
     );
 
     revalidatePath("/settings/tokens");
-    return { token: minted.token, error: null };
+    return { token: minted.token, error: null, projectKey };
   } catch (e) {
-    return { token: null, error: e instanceof Error ? e.message : "unknown error" };
+    return {
+      token: null,
+      error: e instanceof Error ? e.message : "unknown error",
+      projectKey: null,
+    };
   }
 }
 
@@ -68,19 +111,29 @@ export default async function TokensPage() {
   const session = await auth();
   const userId = session!.user.id;
 
-  const tokens = await db
-    .select({
-      id: cliTokens.id,
-      name: cliTokens.name,
-      jti: cliTokens.jti,
-      createdAt: cliTokens.createdAt,
-      lastUsedAt: cliTokens.lastUsedAt,
-      expiresAt: cliTokens.expiresAt,
-      revokedAt: cliTokens.revokedAt,
-    })
-    .from(cliTokens)
-    .where(eq(cliTokens.userId, userId))
-    .orderBy(desc(cliTokens.createdAt));
+  const [tokens, projectRows] = await Promise.all([
+    db
+      .select({
+        id: cliTokens.id,
+        name: cliTokens.name,
+        jti: cliTokens.jti,
+        createdAt: cliTokens.createdAt,
+        lastUsedAt: cliTokens.lastUsedAt,
+        expiresAt: cliTokens.expiresAt,
+        revokedAt: cliTokens.revokedAt,
+      })
+      .from(cliTokens)
+      .where(eq(cliTokens.userId, userId))
+      .orderBy(desc(cliTokens.createdAt)),
+    db
+      .select({
+        key: projects.key,
+        displayName: projects.displayName,
+      })
+      .from(projects)
+      .where(eq(projects.userId, userId))
+      .orderBy(asc(projects.key)),
+  ]);
 
   const active = tokens.filter((t) => !t.revokedAt && t.expiresAt > new Date());
   const inactive = tokens.filter((t) => t.revokedAt || t.expiresAt <= new Date());
@@ -96,7 +149,14 @@ export default async function TokensPage() {
       <Card className="mb-6">
         <CardHeader className="text-sm font-medium text-fg">Generate a new token</CardHeader>
         <CardBody>
-          <TokensManager action={createTokenAction} ttlDays={ttlDays} />
+          <TokensManager
+            action={createTokenAction}
+            ttlDays={ttlDays}
+            projects={projectRows.map((p) => ({
+              key: p.key,
+              displayName: p.displayName,
+            }))}
+          />
         </CardBody>
       </Card>
 

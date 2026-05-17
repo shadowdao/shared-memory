@@ -2,6 +2,7 @@ import NextAuth from "next-auth";
 import { env } from "@/lib/env";
 import { db } from "@/lib/db/client";
 import { users } from "@/lib/db/schema";
+import { syncUserGroupsFromClaim } from "@/lib/auth/sync-groups";
 
 /**
  * NextAuth (Auth.js v5) configuration.
@@ -60,9 +61,21 @@ export const { auth, handlers, signIn, signOut } = NextAuth({
           })
           .returning({ id: users.id });
 
-        token.userId = row[0]?.id;
+        const userId = row[0]?.id;
+        token.userId = userId;
         token.sub = sub;
         token.iss = iss;
+
+        // Sync group memberships from the OIDC `groups` claim. Missing or
+        // empty claim is treated as "user is in zero groups" — that path
+        // wipes the user's existing memberships, which is the conservative
+        // choice (don't keep stale grants alive if the IdP stopped
+        // asserting them).
+        if (userId) {
+          // `profile.groups` is untyped at the next-auth boundary — coerce.
+          const claimGroups = (profile as { groups?: unknown }).groups;
+          await syncUserGroupsFromClaim(userId, iss, claimGroups);
+        }
       }
       return token;
     },

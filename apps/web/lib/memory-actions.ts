@@ -7,6 +7,7 @@ import { auth } from "@/auth";
 import { db } from "@/lib/db/client";
 import { memories, projects, auditLog } from "@/lib/db/schema";
 import { embedText } from "@/lib/embedder";
+import { upsertProject } from "@/lib/projects";
 import {
   MemoryWriteInput,
   MemoryUpdateInput,
@@ -25,29 +26,6 @@ async function requireUserId(): Promise<string> {
   const session = await auth();
   if (!session?.user?.id) throw new Error("not authenticated");
   return session.user.id;
-}
-
-async function resolveProjectId(userId: string, key: string): Promise<string | null> {
-  const row = await db
-    .select({ id: projects.id })
-    .from(projects)
-    .where(and(eq(projects.userId, userId), eq(projects.key, key)))
-    .limit(1);
-  return row[0]?.id ?? null;
-}
-
-async function upsertProject(
-  userId: string,
-  key: string,
-  displayName?: string,
-): Promise<string> {
-  const existing = await resolveProjectId(userId, key);
-  if (existing) return existing;
-  const row = await db
-    .insert(projects)
-    .values({ userId, key, displayName: displayName ?? null })
-    .returning({ id: projects.id });
-  return row[0]!.id;
 }
 
 function parseTags(raw: FormDataEntryValue | null): string[] {
