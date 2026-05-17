@@ -10,6 +10,7 @@ import {
   SnippetDeleteInput,
 } from "@shared-memory/schemas";
 import { putSnippet, softDeleteSnippet } from "@/lib/snippets";
+import { getUserGroupNames } from "@/lib/access";
 
 /**
  * Server Actions for snippet CRUD from the Web UI. Mirrors the MCP
@@ -17,6 +18,10 @@ import { putSnippet, softDeleteSnippet } from "@/lib/snippets";
  * indistinguishable on the storage layer.
  *
  * `actor` is "web" in audit_log so we can tell the two paths apart later.
+ *
+ * Sharing: project-scope snippets under a shared project can be edited
+ * by any user with rw access via this path; the `putSnippet` helper
+ * enforces authorization and optimistic-locking concurrency control.
  */
 
 async function requireUserId(): Promise<string> {
@@ -41,6 +46,7 @@ function targetUrl(scope: "project" | "user", name: string, projectKey: string |
 
 export async function createSnippetAction(formData: FormData) {
   const userId = await requireUserId();
+  const groupNames = await getUserGroupNames(userId);
 
   const scope = (formData.get("scope") as "project" | "user") || "user";
   const projectRaw = (formData.get("project") as string | null)?.trim();
@@ -65,6 +71,7 @@ export async function createSnippetAction(formData: FormData) {
     tags: parsed.data.tags,
     scope: parsed.data.scope,
     projectKey: parsed.data.project,
+    groupNames,
   });
 
   await db.insert(auditLog).values({
@@ -87,11 +94,17 @@ export async function createSnippetAction(formData: FormData) {
 
 export async function updateSnippetAction(formData: FormData) {
   const userId = await requireUserId();
+  const groupNames = await getUserGroupNames(userId);
 
   // Edits keep the row's identity (scope + name + project unchanged) —
   // body/description/tags are what changes. Treat as a put on the same key.
   const scope = (formData.get("scope") as "project" | "user") || "user";
   const projectRaw = (formData.get("project") as string | null)?.trim();
+  const rawVersion = formData.get("version");
+  const versionNum =
+    typeof rawVersion === "string" && rawVersion.length > 0
+      ? Number.parseInt(rawVersion, 10)
+      : undefined;
   const payload = {
     name: String(formData.get("name") ?? "").trim(),
     body: String(formData.get("body") ?? ""),
@@ -99,6 +112,7 @@ export async function updateSnippetAction(formData: FormData) {
     tags: parseTags(formData.get("tags")),
     scope,
     project: scope === "project" ? projectRaw || undefined : undefined,
+    version: Number.isFinite(versionNum) ? versionNum : undefined,
   };
 
   const parsed = SnippetPutInput.safeParse(payload);
@@ -113,6 +127,8 @@ export async function updateSnippetAction(formData: FormData) {
     tags: parsed.data.tags,
     scope: parsed.data.scope,
     projectKey: parsed.data.project,
+    groupNames,
+    version: parsed.data.version,
   });
 
   await db.insert(auditLog).values({
@@ -135,6 +151,7 @@ export async function updateSnippetAction(formData: FormData) {
 
 export async function deleteSnippetAction(formData: FormData) {
   const userId = await requireUserId();
+  const groupNames = await getUserGroupNames(userId);
 
   const scope = formData.get("scope") as "project" | "user" | null;
   const projectRaw = (formData.get("project") as string | null)?.trim();
@@ -153,6 +170,7 @@ export async function deleteSnippetAction(formData: FormData) {
     name: parsed.data.name,
     scope: parsed.data.scope,
     projectKey: parsed.data.project,
+    groupNames,
   });
   if (!deleted) throw new Error("not found");
 

@@ -1,6 +1,12 @@
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
-import { memories, projects, auditLog } from "@/lib/db/schema";
+import {
+  memories,
+  projects,
+  projectShares,
+  groups,
+  auditLog,
+} from "@/lib/db/schema";
 import {
   MemoryIdInput,
   MemoryListInput,
@@ -21,6 +27,12 @@ import {
   listSnippets,
   softDeleteSnippet,
 } from "@/lib/snippets";
+import {
+  CONCURRENT_EDIT_ERROR,
+  canWriteProject,
+  getProjectAccess,
+  readableProjectIds,
+} from "@/lib/access";
 import type { UserContext } from "./context";
 
 /**
@@ -60,17 +72,46 @@ function err(message: string): ToolResult {
   };
 }
 
+/**
+ * Resolve a project_id for a project key visible to this user. Prefers
+ * an owned project, falls back to any project shared with one of the
+ * user's groups (any access level — read is enough to resolve the id).
+ * Returns null when no visible project matches.
+ */
 async function resolveProjectId(
   ctx: UserContext,
   projectKey: string | undefined,
 ): Promise<string | null> {
   if (!projectKey) return null;
-  const row = await db
+  const owned = await db
     .select({ id: projects.id })
     .from(projects)
     .where(and(eq(projects.userId, ctx.userId), eq(projects.key, projectKey)))
     .limit(1);
-  return row[0]?.id ?? null;
+  if (owned[0]) return owned[0].id;
+
+  if (ctx.groups.length === 0) return null;
+
+  const accessibleIds = await readableProjectIds(ctx.userId, ctx.groups);
+  if (accessibleIds.length === 0) return null;
+  const shared = await db
+    .select({ id: projects.id })
+    .from(projects)
+    .where(and(eq(projects.key, projectKey), inArray(projects.id, accessibleIds)))
+    .limit(1);
+  return shared[0]?.id ?? null;
+}
+
+/**
+ * Resolve the project key from a tool call: explicit `project` arg takes
+ * precedence; otherwise fall back to the context-level default (the
+ * `X-Project-Key` header parsed by the MCP route).
+ */
+function projectKeyOrDefault(
+  ctx: UserContext,
+  arg: string | undefined,
+): string | undefined {
+  return arg ?? ctx.defaultProjectKey;
 }
 
 // ---------- tools ----------
@@ -78,7 +119,7 @@ async function resolveProjectId(
 const projectIdentify: ToolDef = {
   name: "project.identify",
   description:
-    "Call ONCE near the start of every session that has a project context — a repo you're working in, a service you're debugging, etc. — to register or look up that project so subsequent project-scoped memories attach correctly. Use a stable `key` you can reproduce next session (repo name, repo URL, or working directory basename). Skip if the work is purely scratch / not tied to a specific codebase.",
+    "Call ONCE near the start of every session that has a project context — a repo you're working in, a service you're debugging, etc. — to register or look up that project so subsequent project-scoped memories attach correctly. Use a stable `key` you can reproduce next session (repo name, repo URL, or working directory basename). Returns shared projects you have access to in addition to your own; when an owned and a shared project would both match the same key, the owned one wins (a server-side warning is logged so the collision is debuggable). Skip if the work is purely scratch / not tied to a specific codebase.",
   inputSchema: {
     type: "object",
     properties: {
@@ -98,19 +139,120 @@ const projectIdentify: ToolDef = {
     const parsed = ProjectIdentifyInput.safeParse(args);
     if (!parsed.success) return err(parsed.error.message);
 
-    const row = await db
+    // 1) Owned project with this key wins.
+    const ownedRow = await db
+      .select({
+        id: projects.id,
+        key: projects.key,
+        displayName: projects.displayName,
+        createdAt: projects.createdAt,
+        userId: projects.userId,
+      })
+      .from(projects)
+      .where(and(eq(projects.userId, ctx.userId), eq(projects.key, parsed.data.key)))
+      .limit(1);
+
+    // 2) If the user belongs to any groups, find shared projects with
+    //    this key. We collect ALL matches because we need to (a) detect
+    //    a collision with the owned match to emit the warning, and
+    //    (b) collapse the access level across the user's groups.
+    let sharedMatches: Array<{
+      projectId: string;
+      displayName: string | null;
+      createdAt: Date;
+      ownerUserId: string;
+      access: "ro" | "rw";
+    }> = [];
+    if (ctx.groups.length > 0) {
+      const rows = await db
+        .select({
+          projectId: projects.id,
+          displayName: projects.displayName,
+          createdAt: projects.createdAt,
+          ownerUserId: projects.userId,
+          access: projectShares.access,
+        })
+        .from(projectShares)
+        .innerJoin(groups, eq(groups.id, projectShares.groupId))
+        .innerJoin(projects, eq(projects.id, projectShares.projectId))
+        .where(
+          and(
+            inArray(groups.name, ctx.groups),
+            eq(projects.key, parsed.data.key),
+          ),
+        );
+      sharedMatches = rows as typeof sharedMatches;
+    }
+
+    if (ownedRow[0]) {
+      // Owned beats shared — but if there's a shared collision, audit
+      // the warning so an operator can see the ambiguity in the log
+      // surface. We don't surface it on the caller's response.
+      const collidesWithShared = sharedMatches.some(
+        (s) => s.projectId !== ownedRow[0]!.id,
+      );
+      if (collidesWithShared) {
+        await db.insert(auditLog).values({
+          userId: ctx.userId,
+          actor: "system",
+          action: "project.identify.collision",
+          entityType: "project",
+          entityId: ownedRow[0].id,
+          payload: {
+            projectKey: parsed.data.key,
+            ownedProjectId: ownedRow[0].id,
+            sharedProjectIds: sharedMatches.map((s) => s.projectId),
+            note: "owned project preferred over shared collision",
+          },
+        });
+      }
+      // Apply display_name update only on the owned project.
+      if (parsed.data.display_name) {
+        await db
+          .update(projects)
+          .set({ displayName: parsed.data.display_name, updatedAt: new Date() })
+          .where(eq(projects.id, ownedRow[0].id));
+      }
+      return ok(
+        {
+          id: ownedRow[0].id,
+          key: ownedRow[0].key,
+          displayName: parsed.data.display_name ?? ownedRow[0].displayName,
+          createdAt: ownedRow[0].createdAt,
+          shared: false,
+          access: "owner" as const,
+          readOnly: false,
+        },
+        `project ${ownedRow[0].key} (${ownedRow[0].id})`,
+      );
+    }
+
+    if (sharedMatches.length > 0) {
+      // Collapse to the strongest access level across the user's groups.
+      const access = sharedMatches.some((s) => s.access === "rw") ? "rw" : "ro";
+      // De-dupe — multiple group rows can point at the same project.
+      const first = sharedMatches[0]!;
+      return ok(
+        {
+          id: first.projectId,
+          key: parsed.data.key,
+          displayName: first.displayName,
+          createdAt: first.createdAt,
+          shared: true,
+          access,
+          readOnly: access === "ro",
+        },
+        `project ${parsed.data.key} (shared, ${access})`,
+      );
+    }
+
+    // 3) Nothing matched — create a new owned project.
+    const created = await db
       .insert(projects)
       .values({
         userId: ctx.userId,
         key: parsed.data.key,
         displayName: parsed.data.display_name ?? null,
-      })
-      .onConflictDoUpdate({
-        target: [projects.userId, projects.key],
-        set: {
-          displayName: parsed.data.display_name ?? sql`${projects.displayName}`,
-          updatedAt: new Date(),
-        },
       })
       .returning({
         id: projects.id,
@@ -119,22 +261,34 @@ const projectIdentify: ToolDef = {
         createdAt: projects.createdAt,
       });
 
-    const p = row[0]!;
-    return ok(p, `project ${p.key} (${p.id})`);
+    const p = created[0]!;
+    return ok(
+      {
+        id: p.id,
+        key: p.key,
+        displayName: p.displayName,
+        createdAt: p.createdAt,
+        shared: false,
+        access: "owner" as const,
+        readOnly: false,
+      },
+      `project ${p.key} (${p.id})`,
+    );
   },
 };
 
 const memoryWrite: ToolDef = {
   name: "memory.write",
   description:
-    "Save a durable fact, preference, or decision that ANY future Claude Code session on ANY of this user's machines should know. Call this when the user shares something that meets ALL of: (1) likely to matter beyond this conversation, (2) not derivable from reading current code/git, (3) would surprise a future you if forgotten. Examples: 'I use HAProxy at home' (user-scope), 'we chose Drizzle over Prisma because of bundle size' (project-scope), 'our prod DB is at db.example.com' (user-scope reference). Use scope='user' for facts about the human or their infra; scope='project' for facts tied to a specific codebase (always preceded by project.identify). Sensitive info (API keys, credentials, connection strings the user actively shares with you) IS appropriate to save here — this server is OIDC-gated and per-user; safer than writing to local container files. DO NOT use for: transient task state, this-session-only scratch notes, or container-specific facts (those belong in the built-in file-based memory at ~/.claude/.../memory/). Tags help retrieval.",
+    "Save a durable fact, preference, or decision that ANY future Claude Code session on ANY of this user's machines should know. Call this when the user shares something that meets ALL of: (1) likely to matter beyond this conversation, (2) not derivable from reading current code/git, (3) would surprise a future you if forgotten. Examples: 'I use HAProxy at home' (user-scope), 'we chose Drizzle over Prisma because of bundle size' (project-scope), 'our prod DB is at db.example.com' (user-scope reference). Use scope='user' for facts about the human or their infra; scope='project' for facts tied to a specific codebase (always preceded by project.identify). In shared projects (i.e. ones surfaced by project.identify with `shared: true`), anyone with rw access can write — your memory becomes visible to every member of every group the project is shared with. Defaults `project` to the X-Project-Key header value if not supplied. Sensitive info (API keys, credentials, connection strings the user actively shares with you) IS appropriate to save here — this server is OIDC-gated and per-user; safer than writing to local container files. DO NOT use for: transient task state, this-session-only scratch notes, or container-specific facts (those belong in the built-in file-based memory at ~/.claude/.../memory/). Tags help retrieval.",
   inputSchema: {
     type: "object",
     properties: {
       content: { type: "string", description: "Memory content (1–64,000 chars)." },
       project: {
         type: "string",
-        description: "Project key (required when scope='project').",
+        description:
+          "Project key. Required when scope='project'; defaults to the X-Project-Key request header if present.",
       },
       scope: {
         type: "string",
@@ -155,11 +309,20 @@ const memoryWrite: ToolDef = {
 
     const scope = parsed.data.scope;
     let projectId: string | null = null;
+    let projectKey: string | undefined = undefined;
     if (scope === "project") {
-      if (!parsed.data.project) return err("scope=project requires `project` key");
-      projectId = await resolveProjectId(ctx, parsed.data.project);
+      projectKey = projectKeyOrDefault(ctx, parsed.data.project);
+      if (!projectKey) {
+        return err("scope=project requires `project` key (or X-Project-Key header)");
+      }
+      projectId = await resolveProjectId(ctx, projectKey);
       if (!projectId) {
-        return err(`unknown project '${parsed.data.project}'; call project.identify first`);
+        return err(`unknown project '${projectKey}'; call project.identify first`);
+      }
+      // Authorize write. Owner always allowed; otherwise require rw.
+      const allowed = await canWriteProject(ctx.userId, ctx.groups, projectId);
+      if (!allowed) {
+        return err(`no write access to project '${projectKey}'`);
       }
     }
 
@@ -178,6 +341,7 @@ const memoryWrite: ToolDef = {
         content: parsed.data.content,
         tags: parsed.data.tags ?? [],
         embedding,
+        lastEditedBy: ctx.userId,
       })
       .returning({ id: memories.id, createdAt: memories.createdAt });
 
@@ -188,7 +352,7 @@ const memoryWrite: ToolDef = {
       action: "memory.write",
       entityType: "memory",
       entityId: m.id,
-      payload: { scope, projectKey: parsed.data.project ?? null, tags: parsed.data.tags ?? [] },
+      payload: { scope, projectKey: projectKey ?? null, tags: parsed.data.tags ?? [] },
     });
 
     return ok({ id: m.id, createdAt: m.createdAt }, `wrote memory ${m.id}`);
@@ -216,12 +380,20 @@ const memoryList: ToolDef = {
     const parsed = MemoryListInput.safeParse(args);
     if (!parsed.success) return err(parsed.error.message);
 
-    const where = [eq(memories.userId, ctx.userId), isNull(memories.deletedAt)];
+    // Visibility: own rows OR rows in any project shared with my groups.
+    const accessibleIds = await readableProjectIds(ctx.userId, ctx.groups);
+    const visibilityClause =
+      accessibleIds.length > 0
+        ? or(eq(memories.userId, ctx.userId), inArray(memories.projectId, accessibleIds))
+        : eq(memories.userId, ctx.userId);
+
+    const where = [visibilityClause!, isNull(memories.deletedAt)];
 
     if (parsed.data.scope) where.push(eq(memories.scope, parsed.data.scope));
 
-    if (parsed.data.project) {
-      const projectId = await resolveProjectId(ctx, parsed.data.project);
+    const requestedKey = projectKeyOrDefault(ctx, parsed.data.project);
+    if (requestedKey) {
+      const projectId = await resolveProjectId(ctx, requestedKey);
       if (!projectId) return ok({ items: [], next_cursor: null }, "0 results");
       where.push(eq(memories.projectId, projectId));
     }
@@ -237,6 +409,8 @@ const memoryList: ToolDef = {
         projectId: memories.projectId,
         content: memories.content,
         tags: memories.tags,
+        version: memories.version,
+        lastEditedBy: memories.lastEditedBy,
         createdAt: memories.createdAt,
         updatedAt: memories.updatedAt,
       })
@@ -265,17 +439,21 @@ const memoryGet: ToolDef = {
     const row = await db
       .select()
       .from(memories)
-      .where(
-        and(
-          eq(memories.id, parsed.data.id),
-          eq(memories.userId, ctx.userId),
-          isNull(memories.deletedAt),
-        ),
-      )
+      .where(and(eq(memories.id, parsed.data.id), isNull(memories.deletedAt)))
       .limit(1);
 
     if (!row[0]) return err("not found");
-    return ok(row[0], `memory ${row[0].id}`);
+
+    // Authorize read: own row, OR project-scope row in an accessible
+    // project. Anything else looks "not found" to the caller.
+    const m = row[0];
+    if (m.userId !== ctx.userId) {
+      if (!m.projectId) return err("not found");
+      const access = await getProjectAccess(ctx.userId, ctx.groups, m.projectId);
+      if (access === null) return err("not found");
+    }
+
+    return ok(m, `memory ${m.id}`);
   },
 };
 
@@ -292,16 +470,34 @@ const memoryDelete: ToolDef = {
     const parsed = MemoryIdInput.safeParse(args);
     if (!parsed.success) return err(parsed.error.message);
 
+    // Look up the row first to authorize. We can't rely on a
+    // single-statement WHERE clause because shared-project writes
+    // need a per-project access check.
+    const target = await db
+      .select({
+        id: memories.id,
+        userId: memories.userId,
+        projectId: memories.projectId,
+        scope: memories.scope,
+      })
+      .from(memories)
+      .where(and(eq(memories.id, parsed.data.id), isNull(memories.deletedAt)))
+      .limit(1);
+    const m = target[0];
+    if (!m) return err("not found");
+
+    if (m.userId !== ctx.userId) {
+      // Not the owner. User-scope memories can only be deleted by their
+      // owner; project-scope require rw access on the project.
+      if (m.scope === "user" || !m.projectId) return err("not found");
+      const allowed = await canWriteProject(ctx.userId, ctx.groups, m.projectId);
+      if (!allowed) return err("no write access to this project");
+    }
+
     const updated = await db
       .update(memories)
-      .set({ deletedAt: new Date() })
-      .where(
-        and(
-          eq(memories.id, parsed.data.id),
-          eq(memories.userId, ctx.userId),
-          isNull(memories.deletedAt),
-        ),
-      )
+      .set({ deletedAt: new Date(), lastEditedBy: ctx.userId })
+      .where(and(eq(memories.id, parsed.data.id), isNull(memories.deletedAt)))
       .returning({ id: memories.id });
 
     if (!updated[0]) return err("not found");
@@ -321,7 +517,7 @@ const memoryDelete: ToolDef = {
 const memoryUpdate: ToolDef = {
   name: "memory.update",
   description:
-    "Edit an existing memory in place — for correcting a stored fact, expanding it with new detail, adjusting tags, or moving it to a different scope/project. Preserves the memory's id (so callers referencing it don't break) and re-embeds automatically when content changes. Pass `scope` and/or `project` to reclassify a memory between user-global and project-attached without recreating it. Use this — not delete + write — whenever you're refining what's already there.",
+    "Edit an existing memory in place — for correcting a stored fact, expanding it with new detail, adjusting tags, or moving it to a different scope/project. Preserves the memory's id (so callers referencing it don't break) and re-embeds automatically when content changes. Pass `scope` and/or `project` to reclassify a memory between user-global and project-attached without recreating it. In shared projects, anyone in a rw-access group can edit any memory — pass `version` (returned by memory.get / memory.list) to detect concurrent edits and avoid clobbering. The server bumps `version` on every successful update; a stale `version` returns the concurrent-edit error. Use this — not delete + write — whenever you're refining what's already there.",
   inputSchema: {
     type: "object",
     properties: {
@@ -339,6 +535,12 @@ const memoryUpdate: ToolDef = {
         description:
           "Project key the memory should attach to (required and only valid when scope='project'). The project must already exist — call `project.identify` first if it doesn't.",
       },
+      version: {
+        type: "integer",
+        minimum: 0,
+        description:
+          "Optimistic-locking token from memory.get / memory.list. When supplied, the update is rejected if the row was edited by someone else since you read it.",
+      },
     },
     required: ["id"],
   },
@@ -353,21 +555,29 @@ const memoryUpdate: ToolDef = {
         scope: memories.scope,
         projectId: memories.projectId,
         projectKey: projects.key,
+        version: memories.version,
+        userId: memories.userId,
       })
       .from(memories)
       .leftJoin(projects, eq(memories.projectId, projects.id))
-      .where(
-        and(
-          eq(memories.id, parsed.data.id),
-          eq(memories.userId, ctx.userId),
-          isNull(memories.deletedAt),
-        ),
-      )
+      .where(and(eq(memories.id, parsed.data.id), isNull(memories.deletedAt)))
       .limit(1);
     const existing = existingRows[0];
     if (!existing) return err("not found");
 
-    const update: Record<string, unknown> = { updatedAt: new Date() };
+    // Authorize write.
+    if (existing.scope === "user") {
+      if (existing.userId !== ctx.userId) return err("not found");
+    } else if (existing.projectId) {
+      const allowed = await canWriteProject(ctx.userId, ctx.groups, existing.projectId);
+      if (!allowed) return err("no write access to this project");
+    }
+
+    const update: Record<string, unknown> = {
+      updatedAt: new Date(),
+      lastEditedBy: ctx.userId,
+      version: existing.version + 1,
+    };
     if (parsed.data.tags !== undefined) update.tags = parsed.data.tags;
     if (parsed.data.content !== undefined && parsed.data.content !== existing.content) {
       update.content = parsed.data.content;
@@ -390,11 +600,16 @@ const memoryUpdate: ToolDef = {
           newProjectKey = null;
         }
       } else {
-        // scope === 'project' — schema refine guarantees `project` is set
+        // scope === 'project' — schema refine guarantees `project` is set.
         const projectKey = parsed.data.project!;
         const projectId = await resolveProjectId(ctx, projectKey);
         if (!projectId) {
           return err(`unknown project '${projectKey}'; call project.identify first`);
+        }
+        // Moving INTO a project requires write access there.
+        const allowedTarget = await canWriteProject(ctx.userId, ctx.groups, projectId);
+        if (!allowedTarget) {
+          return err(`no write access to project '${projectKey}'`);
         }
         if (existing.scope !== "project") {
           update.scope = "project";
@@ -408,13 +623,27 @@ const memoryUpdate: ToolDef = {
       }
     }
 
+    const expectedVersion = parsed.data.version ?? existing.version;
     const updated = await db
       .update(memories)
       .set(update)
-      .where(eq(memories.id, parsed.data.id))
-      .returning({ id: memories.id, updatedAt: memories.updatedAt });
+      .where(
+        and(
+          eq(memories.id, parsed.data.id),
+          eq(memories.version, expectedVersion),
+        ),
+      )
+      .returning({
+        id: memories.id,
+        updatedAt: memories.updatedAt,
+        version: memories.version,
+      });
 
-    const auditFields = Object.keys(update).filter((k) => k !== "updatedAt");
+    if (!updated[0]) return err(CONCURRENT_EDIT_ERROR);
+
+    const auditFields = Object.keys(update).filter(
+      (k) => k !== "updatedAt" && k !== "version" && k !== "lastEditedBy",
+    );
     const auditPayload: Record<string, unknown> = { fields: auditFields };
     if (scopeChanged || projectChanged) {
       auditPayload.scope = {
@@ -460,17 +689,16 @@ const memorySearch: ToolDef = {
     if (!parsed.success) return err(parsed.error.message);
 
     const { query, scope, tags, limit } = parsed.data;
-    const projectId = parsed.data.project
-      ? await resolveProjectId(ctx, parsed.data.project)
-      : null;
-    if (parsed.data.project && !projectId) {
+    const requestedKey = projectKeyOrDefault(ctx, parsed.data.project);
+    const projectId = requestedKey ? await resolveProjectId(ctx, requestedKey) : null;
+    if (requestedKey && !projectId) {
       return ok({ items: [], debug: { vec: 0, fts: 0, tag: 0 } }, "0 results (unknown project)");
     }
 
     const result = await searchMemories(
       ctx.userId,
       query,
-      { scope, projectKey: parsed.data.project, tags },
+      { scope, projectKey: requestedKey, tags, groupNames: ctx.groups },
       limit,
     );
 
@@ -486,6 +714,8 @@ const memorySearch: ToolDef = {
         projectId: memories.projectId,
         content: memories.content,
         tags: memories.tags,
+        version: memories.version,
+        lastEditedBy: memories.lastEditedBy,
         createdAt: memories.createdAt,
         updatedAt: memories.updatedAt,
       })
@@ -513,7 +743,7 @@ const memorySearch: ToolDef = {
 const snippetPut: ToolDef = {
   name: "snippet.put",
   description:
-    "Save or update a named reusable artifact — a template, format, or checklist the user wants applied consistently. Call this when the user says 'remember this as my X template', 'save this format as Y', or 'use this checklist whenever I do Z'. Different from memory.write (which is for facts you'll later search): snippets are fetched by EXACT name, not searched, so the name is the contract — pick something stable and predictable (e.g. 'pr-description-format', 'commit-msg-rules', 'code-review-checklist'). Use scope='user' (default) for personal templates that apply everywhere; scope='project' for repo-specific variants (requires `project`, same key you used for project.identify). Re-calling with the same name+scope replaces the body in place — there is no separate update tool. Tags help browsing in the Web UI; they do NOT enable search.",
+    "Save or update a named reusable artifact — a template, format, or checklist the user wants applied consistently. Call this when the user says 'remember this as my X template', 'save this format as Y', or 'use this checklist whenever I do Z'. Different from memory.write (which is for facts you'll later search): snippets are fetched by EXACT name, not searched, so the name is the contract — pick something stable and predictable (e.g. 'pr-description-format', 'commit-msg-rules', 'code-review-checklist'). Use scope='user' (default) for personal templates that apply everywhere; scope='project' for repo-specific variants (requires `project`, same key you used for project.identify, defaulted from the X-Project-Key header). Re-calling with the same name+scope replaces the body in place — there is no separate update tool. In shared projects, anyone in a rw-access group can edit any project-scope snippet — pass `version` (returned by snippet.get / snippet.list) to detect concurrent edits and avoid clobbering. Tags help browsing in the Web UI; they do NOT enable search.",
   inputSchema: {
     type: "object",
     properties: {
@@ -534,16 +764,23 @@ const snippetPut: ToolDef = {
         type: "string",
         enum: ["project", "user"],
         description:
-          "'user' (default) = applies everywhere. 'project' = tied to one repo and requires `project`.",
+          "'user' (default) = applies everywhere. 'project' = tied to one repo and requires `project` (or X-Project-Key header).",
       },
       project: {
         type: "string",
-        description: "Project key (required when scope='project').",
+        description:
+          "Project key. Required for scope='project'; defaults to the X-Project-Key request header if present.",
       },
       tags: {
         type: "array",
         items: { type: "string" },
         description: "Optional tags for grouping in the Web UI.",
+      },
+      version: {
+        type: "integer",
+        minimum: 0,
+        description:
+          "Optimistic-locking token from snippet.get / snippet.list. Only consulted on the update path (i.e. when a row with this name+scope+project already exists).",
       },
     },
     required: ["name", "body"],
@@ -552,48 +789,64 @@ const snippetPut: ToolDef = {
     const parsed = SnippetPutInput.safeParse(args);
     if (!parsed.success) return err(parsed.error.message);
 
-    if (parsed.data.scope === "project") {
-      const exists = await resolveProjectId(ctx, parsed.data.project!);
-      if (!exists) {
-        return err(
-          `unknown project '${parsed.data.project}'; call project.identify first`,
-        );
-      }
+    // Apply X-Project-Key default for scope=project.
+    const projectKey =
+      parsed.data.scope === "project"
+        ? projectKeyOrDefault(ctx, parsed.data.project)
+        : undefined;
+    if (parsed.data.scope === "project" && !projectKey) {
+      return err("scope=project requires `project` (or X-Project-Key header)");
     }
 
-    const { snippet, inserted } = await putSnippet(ctx.userId, {
-      name: parsed.data.name,
-      body: parsed.data.body,
-      description: parsed.data.description,
-      tags: parsed.data.tags,
-      scope: parsed.data.scope,
-      projectKey: parsed.data.project,
-    });
+    if (parsed.data.scope === "project") {
+      const exists = await resolveProjectId(ctx, projectKey!);
+      // It's OK for the project not to exist — putSnippet will create
+      // it owned by the caller. But if it DOES exist as a shared
+      // project, we need rw to write through it; the helper enforces
+      // that.
+      void exists;
+    }
 
-    await db.insert(auditLog).values({
-      userId: ctx.userId,
-      actor: "mcp",
-      action: inserted ? "snippet.put" : "snippet.update",
-      entityType: "snippet",
-      entityId: snippet.id,
-      payload: {
-        name: snippet.name,
-        scope: snippet.scope,
-        projectKey: snippet.projectKey,
-        tags: snippet.tags,
-      },
-    });
+    try {
+      const { snippet, inserted } = await putSnippet(ctx.userId, {
+        name: parsed.data.name,
+        body: parsed.data.body,
+        description: parsed.data.description,
+        tags: parsed.data.tags,
+        scope: parsed.data.scope,
+        projectKey,
+        groupNames: ctx.groups,
+        version: parsed.data.version,
+      });
 
-    return ok(
-      {
-        id: snippet.id,
-        name: snippet.name,
-        scope: snippet.scope,
-        project: snippet.projectKey,
-        inserted,
-      },
-      `${inserted ? "wrote" : "updated"} snippet '${snippet.name}' (${snippet.scope})`,
-    );
+      await db.insert(auditLog).values({
+        userId: ctx.userId,
+        actor: "mcp",
+        action: inserted ? "snippet.put" : "snippet.update",
+        entityType: "snippet",
+        entityId: snippet.id,
+        payload: {
+          name: snippet.name,
+          scope: snippet.scope,
+          projectKey: snippet.projectKey,
+          tags: snippet.tags,
+        },
+      });
+
+      return ok(
+        {
+          id: snippet.id,
+          name: snippet.name,
+          scope: snippet.scope,
+          project: snippet.projectKey,
+          version: snippet.version,
+          inserted,
+        },
+        `${inserted ? "wrote" : "updated"} snippet '${snippet.name}' (${snippet.scope})`,
+      );
+    } catch (e) {
+      return err(e instanceof Error ? e.message : "snippet.put failed");
+    }
   },
 };
 
@@ -623,10 +876,12 @@ const snippetGet: ToolDef = {
     const parsed = SnippetGetInput.safeParse(args);
     if (!parsed.success) return err(parsed.error.message);
 
+    const requestedKey = projectKeyOrDefault(ctx, parsed.data.project);
     const snippet = await getSnippet(ctx.userId, {
       name: parsed.data.name,
       scope: parsed.data.scope,
-      projectKey: parsed.data.project,
+      projectKey: requestedKey,
+      groupNames: ctx.groups,
     });
 
     if (!snippet) return err(`snippet '${parsed.data.name}' not found`);
@@ -640,6 +895,8 @@ const snippetGet: ToolDef = {
         scope: snippet.scope,
         project: snippet.projectKey,
         tags: snippet.tags,
+        version: snippet.version,
+        lastEditedBy: snippet.lastEditedBy,
         createdAt: snippet.createdAt,
         updatedAt: snippet.updatedAt,
       },
@@ -672,11 +929,13 @@ const snippetList: ToolDef = {
     const parsed = SnippetListInput.safeParse(args);
     if (!parsed.success) return err(parsed.error.message);
 
+    const requestedKey = projectKeyOrDefault(ctx, parsed.data.project);
     const rows = await listSnippets(ctx.userId, {
       scope: parsed.data.scope,
-      projectKey: parsed.data.project,
+      projectKey: requestedKey,
       tags: parsed.data.tags,
       limit: parsed.data.limit,
+      groupNames: ctx.groups,
     });
 
     const items = rows.map((r) => ({
@@ -686,6 +945,8 @@ const snippetList: ToolDef = {
       scope: r.scope,
       project: r.projectKey,
       tags: r.tags,
+      version: r.version,
+      lastEditedBy: r.lastEditedBy,
       createdAt: r.createdAt,
       updatedAt: r.updatedAt,
     }));
@@ -711,30 +972,36 @@ const snippetDelete: ToolDef = {
     const parsed = SnippetDeleteInput.safeParse(args);
     if (!parsed.success) return err(parsed.error.message);
 
-    const deleted = await softDeleteSnippet(ctx.userId, {
-      name: parsed.data.name,
-      scope: parsed.data.scope,
-      projectKey: parsed.data.project,
-    });
-    if (!deleted) return err(`snippet '${parsed.data.name}' not found`);
-
-    await db.insert(auditLog).values({
-      userId: ctx.userId,
-      actor: "mcp",
-      action: "snippet.delete",
-      entityType: "snippet",
-      entityId: deleted.id,
-      payload: {
+    const requestedKey = projectKeyOrDefault(ctx, parsed.data.project);
+    try {
+      const deleted = await softDeleteSnippet(ctx.userId, {
         name: parsed.data.name,
-        scope: deleted.scope,
-        projectKey: deleted.projectKey,
-      },
-    });
+        scope: parsed.data.scope,
+        projectKey: requestedKey,
+        groupNames: ctx.groups,
+      });
+      if (!deleted) return err(`snippet '${parsed.data.name}' not found`);
 
-    return ok(
-      { id: deleted.id, name: parsed.data.name, deleted: true },
-      `deleted snippet '${parsed.data.name}' (${deleted.scope})`,
-    );
+      await db.insert(auditLog).values({
+        userId: ctx.userId,
+        actor: "mcp",
+        action: "snippet.delete",
+        entityType: "snippet",
+        entityId: deleted.id,
+        payload: {
+          name: parsed.data.name,
+          scope: deleted.scope,
+          projectKey: deleted.projectKey,
+        },
+      });
+
+      return ok(
+        { id: deleted.id, name: parsed.data.name, deleted: true },
+        `deleted snippet '${parsed.data.name}' (${deleted.scope})`,
+      );
+    } catch (e) {
+      return err(e instanceof Error ? e.message : "snippet.delete failed");
+    }
   },
 };
 

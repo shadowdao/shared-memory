@@ -10,6 +10,8 @@ import {
   customType,
   vector,
   varchar,
+  integer,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -37,6 +39,10 @@ const textArray = customType<{ data: string[]; driverData: string }>({
 export const memoryScope = pgEnum("memory_scope", ["project", "user"]);
 export const memoryVisibility = pgEnum("memory_visibility", ["private", "shared", "team"]);
 export const auditActor = pgEnum("audit_actor", ["mcp", "web", "system"]);
+// `memory_access` is created by Agent A's `0003_groups.sql`. Declared here
+// so Drizzle's TS layer can reference the enum from `project_shares`. The
+// enum values must stay in lock-step with that migration.
+export const memoryAccess = pgEnum("memory_access", ["ro", "rw"]);
 
 // ---------- tables ----------
 
@@ -94,6 +100,14 @@ export const memories = pgTable(
     embedding: vector("embedding", { dimensions: 384 }),
     // Generated column — see migration SQL for definition.
     contentTsv: tsvector("content_tsv"),
+    // Optimistic-locking counter. Bumped on every successful UPDATE so
+    // concurrent edits (now possible across shared-project members) can
+    // detect lost-write situations and surface "refresh and try again".
+    version: integer("version").notNull().default(1),
+    // The user whose UPDATE most recently mutated this row. NULL only on
+    // the very first INSERT (pre-update). FK is `SET NULL` so deleting
+    // an account doesn't wipe other people's memories.
+    lastEditedBy: uuid("last_edited_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
@@ -121,6 +135,11 @@ export const snippets = pgTable(
     body: text("body").notNull(),
     description: text("description"),
     tags: textArray("tags").notNull().default([]),
+    // See `memories.version` / `memories.lastEditedBy` for the rationale —
+    // snippets in shared projects can now be co-edited so we need the same
+    // optimistic-locking primitive here.
+    version: integer("version").notNull().default(1),
+    lastEditedBy: uuid("last_edited_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
@@ -149,6 +168,80 @@ export const cliTokens = pgTable(
   },
   (t) => ({
     userIdx: index("cli_tokens_user_idx").on(t.userId),
+  }),
+);
+
+// ---------- groups + sharing ----------
+//
+// `groups` and `user_groups` are owned by Agent A's `0003_groups.sql`
+// migration. We declare the Drizzle table objects here so this phase's
+// code (project sharing, authorization helpers, the share-management UI)
+// can reference them through the same `@/lib/db/schema` import path the
+// rest of the codebase uses. The column shape MUST stay aligned with
+// Agent A's migration; if their values change, update both sides.
+export const groups = pgTable(
+  "groups",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // OIDC issuer that minted the group claim. Lets us federate later
+    // without name collisions between two IdPs that both have e.g.
+    // "engineering".
+    oidcIss: text("oidc_iss").notNull(),
+    // Group `name` as it appears in the JWT (Authentik groups claim).
+    name: text("name").notNull(),
+    displayName: text("display_name"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    uniqueIssName: uniqueIndex("groups_iss_name_uq").on(t.oidcIss, t.name),
+  }),
+);
+
+export const userGroups = pgTable(
+  "user_groups",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    // When the row was most recently confirmed by an OIDC sign-in. Agent
+    // A bumps this on every successful auth so a stale membership can be
+    // detected.
+    syncedAt: timestamp("synced_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.userId, t.groupId] }),
+    groupIdx: index("user_groups_group_idx").on(t.groupId),
+  }),
+);
+
+// `project_shares` grants a `group` access to a `project`. Each row
+// authorizes every user in that group to read (and, when access='rw',
+// write) every memory + snippet under that project. The (project_id,
+// group_id) composite PK enforces "one share per (project, group)".
+//
+// Owners share projects from the Web UI; the MCP layer can list shared
+// projects via project.identify but cannot grant new shares.
+export const projectShares = pgTable(
+  "project_shares",
+  {
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    access: memoryAccess("access").notNull(),
+    grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
+    // Audit-friendly. `SET NULL` so deleting the granter's account doesn't
+    // cascade-remove the share.
+    grantedBy: uuid("granted_by").references(() => users.id, { onDelete: "set null" }),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.projectId, t.groupId] }),
+    groupIdx: index("project_shares_group_idx").on(t.groupId),
   }),
 );
 
@@ -188,3 +281,9 @@ export type CliToken = typeof cliTokens.$inferSelect;
 export type NewCliToken = typeof cliTokens.$inferInsert;
 export type AuditEntry = typeof auditLog.$inferSelect;
 export type NewAuditEntry = typeof auditLog.$inferInsert;
+export type Group = typeof groups.$inferSelect;
+export type NewGroup = typeof groups.$inferInsert;
+export type UserGroup = typeof userGroups.$inferSelect;
+export type NewUserGroup = typeof userGroups.$inferInsert;
+export type ProjectShare = typeof projectShares.$inferSelect;
+export type NewProjectShare = typeof projectShares.$inferInsert;

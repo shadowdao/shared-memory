@@ -1,11 +1,12 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, or } from "drizzle-orm";
 import { auth } from "@/auth";
 import { db } from "@/lib/db/client";
-import { snippets, projects } from "@/lib/db/schema";
+import { snippets, projects, users } from "@/lib/db/schema";
 import { updateSnippetAction, deleteSnippetAction } from "@/lib/snippet-actions";
 import { getSnippet, type SnippetWithProjectKey } from "@/lib/snippets";
+import { getProjectAccess, getUserGroupNames, readableProjectIds } from "@/lib/access";
 import { Container, PageHeader } from "@/app/_components/ui/container";
 import { Card, CardBody, CardHeader } from "@/app/_components/ui/card";
 import { Input, Textarea, Label } from "@/app/_components/ui/input";
@@ -23,8 +24,25 @@ interface SiblingHit {
  * When a snippet name exists in more than one scope (e.g. a user-scope
  * default plus one or more project-scope variants), we need to either
  * disambiguate by query string or, if no hint is given, show a picker.
+ *
+ * Visibility widening: with sharing, the user may also see project-
+ * scope snippets under shared projects. Match rows that the viewer can
+ * read (own user-scope rows, or project-scope rows in an accessible
+ * project).
  */
-async function findAllMatches(userId: string, name: string): Promise<SiblingHit[]> {
+async function findAllMatches(
+  userId: string,
+  groupNames: string[],
+  name: string,
+): Promise<SiblingHit[]> {
+  const accessibleProjectIds = await readableProjectIds(userId, groupNames);
+  const visibility =
+    accessibleProjectIds.length > 0
+      ? or(
+          and(eq(snippets.userId, userId), isNull(snippets.projectId)),
+          inArray(snippets.projectId, accessibleProjectIds),
+        )
+      : and(eq(snippets.userId, userId), isNull(snippets.projectId));
   const rows = await db
     .select({
       scope: snippets.scope,
@@ -32,7 +50,7 @@ async function findAllMatches(userId: string, name: string): Promise<SiblingHit[
     })
     .from(snippets)
     .leftJoin(projects, eq(snippets.projectId, projects.id))
-    .where(and(eq(snippets.userId, userId), eq(snippets.name, name), isNull(snippets.deletedAt)));
+    .where(and(eq(snippets.name, name), isNull(snippets.deletedAt), visibility!));
   return rows as SiblingHit[];
 }
 
@@ -45,15 +63,16 @@ export default async function SnippetDetailPage({
 }) {
   const session = await auth();
   const userId = session!.user.id;
+  const groupNames = await getUserGroupNames(userId);
   const { name: rawName } = await params;
   const name = decodeURIComponent(rawName);
   const sp = await searchParams;
   const scope: "project" | "user" | undefined =
     sp.scope === "user" || sp.scope === "project" ? sp.scope : undefined;
   const project = sp.project?.trim() || undefined;
-  const isEditing = sp.edit === "1";
+  const wantsEdit = sp.edit === "1";
 
-  const siblings = await findAllMatches(userId, name);
+  const siblings = await findAllMatches(userId, groupNames, name);
   if (siblings.length === 0) notFound();
 
   // If multiple matches and the user hasn't disambiguated, show a picker.
@@ -103,9 +122,35 @@ export default async function SnippetDetailPage({
     name,
     scope,
     projectKey: project,
+    groupNames,
   });
 
   if (!snippet) notFound();
+
+  // Authorize: user-scope rows belong solely to their owner; project-
+  // scope rows require rw on the project (or ownership) to edit.
+  let canWrite: boolean;
+  if (snippet.scope === "user") {
+    canWrite = snippet.userId === userId;
+  } else if (snippet.projectId) {
+    const access = await getProjectAccess(userId, groupNames, snippet.projectId);
+    canWrite = access === "owner" || access === "rw";
+  } else {
+    canWrite = false;
+  }
+  const isEditing = wantsEdit && canWrite;
+
+  // Editor name for "Last edited by ..." footer.
+  const editorRow = snippet.lastEditedBy
+    ? await db
+        .select({ name: users.name, email: users.email })
+        .from(users)
+        .where(eq(users.id, snippet.lastEditedBy))
+        .limit(1)
+    : [];
+  const editorLabel = editorRow[0]
+    ? editorRow[0].name ?? editorRow[0].email ?? "unknown"
+    : null;
 
   return (
     <Container className="pt-6 max-w-3xl">
@@ -124,7 +169,7 @@ export default async function SnippetDetailPage({
                 Back
               </Button>
             </Link>
-            {!isEditing ? (
+            {!isEditing && canWrite ? (
               <Link
                 href={`/snippets/${encodeURIComponent(snippet.name)}?${new URLSearchParams({
                   scope: snippet.scope,
@@ -150,6 +195,9 @@ export default async function SnippetDetailPage({
           {snippet.updatedAt.getTime() !== snippet.createdAt.getTime() ? (
             <span>· Updated {new Date(snippet.updatedAt).toLocaleString()}</span>
           ) : null}
+          {editorLabel && snippet.lastEditedBy !== snippet.userId ? (
+            <span className="text-fg-subtle">· Last edited by {editorLabel}</span>
+          ) : null}
         </CardHeader>
 
         {isEditing ? (
@@ -157,6 +205,7 @@ export default async function SnippetDetailPage({
             <form action={updateSnippetAction} className="space-y-4">
               <input type="hidden" name="name" value={snippet.name} />
               <input type="hidden" name="scope" value={snippet.scope} />
+              <input type="hidden" name="version" value={snippet.version} />
               {snippet.scope === "project" && snippet.projectKey ? (
                 <input type="hidden" name="project" value={snippet.projectKey} />
               ) : null}
@@ -234,7 +283,7 @@ export default async function SnippetDetailPage({
         )}
       </Card>
 
-      {!isEditing ? (
+      {!isEditing && canWrite ? (
         <form action={deleteSnippetAction} className="flex justify-end">
           <input type="hidden" name="name" value={snippet.name} />
           <input type="hidden" name="scope" value={snippet.scope} />

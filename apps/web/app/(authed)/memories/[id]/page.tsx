@@ -1,10 +1,11 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import { auth } from "@/auth";
 import { db } from "@/lib/db/client";
-import { memories, projects } from "@/lib/db/schema";
+import { memories, projects, projectShares, groups, users } from "@/lib/db/schema";
 import { updateMemoryAction, deleteMemoryAction } from "@/lib/memory-actions";
+import { getProjectAccess, getUserGroupNames, readableProjectIds } from "@/lib/access";
 import { Container, PageHeader } from "@/app/_components/ui/container";
 import { Card, CardBody, CardHeader } from "@/app/_components/ui/card";
 import { Input, Textarea, Label } from "@/app/_components/ui/input";
@@ -22,8 +23,22 @@ export default async function MemoryDetailPage({
 }) {
   const session = await auth();
   const userId = session!.user.id;
+  const groupNames = await getUserGroupNames(userId);
   const { id } = await params;
   const { edit } = await searchParams;
+
+  // Widen the visibility predicate: a user can see a memory they own,
+  // or any memory whose project is shared with them. Project_id filter
+  // uses the precomputed accessible-id list for parity with the search
+  // / list paths.
+  const accessibleProjectIds = await readableProjectIds(userId, groupNames);
+  const visibility =
+    accessibleProjectIds.length > 0
+      ? or(
+          eq(memories.userId, userId),
+          inArray(memories.projectId, accessibleProjectIds),
+        )
+      : eq(memories.userId, userId);
 
   const rows = await db
     .select({
@@ -31,22 +46,58 @@ export default async function MemoryDetailPage({
       scope: memories.scope,
       content: memories.content,
       tags: memories.tags,
+      version: memories.version,
+      lastEditedBy: memories.lastEditedBy,
       createdAt: memories.createdAt,
       updatedAt: memories.updatedAt,
       projectKey: projects.key,
       projectId: memories.projectId,
+      ownerUserId: memories.userId,
     })
     .from(memories)
     .leftJoin(projects, eq(memories.projectId, projects.id))
-    .where(
-      and(eq(memories.id, id), eq(memories.userId, userId), isNull(memories.deletedAt)),
-    )
+    .where(and(eq(memories.id, id), isNull(memories.deletedAt), visibility!))
     .limit(1);
 
   const m = rows[0];
   if (!m) notFound();
 
-  const isEditing = edit === "1";
+  // Determine the viewer's write permission. user-scope memories =
+  // owner-only; project-scope = canWriteProject. Used to gate the
+  // Edit / Delete affordances.
+  let canWrite: boolean;
+  if (m.scope === "user") {
+    canWrite = m.ownerUserId === userId;
+  } else if (m.projectId) {
+    const access = await getProjectAccess(userId, groupNames, m.projectId);
+    canWrite = access === "owner" || access === "rw";
+  } else {
+    canWrite = false;
+  }
+
+  const isEditing = edit === "1" && canWrite;
+
+  // Shares on this project drive the "Shared" chip plus an editor-name
+  // lookup (we want to display who last edited, even if they're another
+  // member of the same group).
+  const shareRows = m.projectId
+    ? await db
+        .select({ groupName: groups.name })
+        .from(projectShares)
+        .innerJoin(groups, eq(groups.id, projectShares.groupId))
+        .where(eq(projectShares.projectId, m.projectId))
+    : [];
+
+  const editorRow = m.lastEditedBy
+    ? await db
+        .select({ name: users.name, email: users.email })
+        .from(users)
+        .where(eq(users.id, m.lastEditedBy))
+        .limit(1)
+    : [];
+  const editorLabel = editorRow[0]
+    ? editorRow[0].name ?? editorRow[0].email ?? "unknown"
+    : null;
 
   const projectList = isEditing
     ? await db
@@ -67,7 +118,7 @@ export default async function MemoryDetailPage({
             <Link href="/memories" className="no-underline">
               <Button type="button" variant="secondary">Back</Button>
             </Link>
-            {!isEditing ? (
+            {!isEditing && canWrite ? (
               <Link href={`/memories/${m.id}?edit=1`} className="no-underline">
                 <Button>Edit</Button>
               </Link>
@@ -77,12 +128,25 @@ export default async function MemoryDetailPage({
       />
 
       <Card className="mb-4">
-        <CardHeader className="flex items-center gap-2 text-xs text-fg-muted">
+        <CardHeader className="flex items-center gap-2 text-xs text-fg-muted flex-wrap">
           <Badge tone={m.scope === "user" ? "accent" : "neutral"}>{m.scope}</Badge>
           {m.projectKey ? <span className="font-mono">{m.projectKey}</span> : null}
+          {shareRows.length > 0 ? (
+            <Badge
+              tone="accent"
+              title={`Shared with ${shareRows.map((s) => s.groupName).join(", ")}`}
+            >
+              Shared
+            </Badge>
+          ) : null}
           <span>· Created {new Date(m.createdAt).toLocaleString()}</span>
           {m.updatedAt.getTime() !== m.createdAt.getTime() ? (
             <span>· Updated {new Date(m.updatedAt).toLocaleString()}</span>
+          ) : null}
+          {editorLabel && m.lastEditedBy !== m.ownerUserId ? (
+            <span className="text-fg-subtle">
+              · Last edited by {editorLabel}
+            </span>
           ) : null}
         </CardHeader>
 
@@ -90,6 +154,7 @@ export default async function MemoryDetailPage({
           <CardBody>
             <form action={updateMemoryAction} className="space-y-4">
               <input type="hidden" name="id" value={m.id} />
+              <input type="hidden" name="version" value={m.version} />
               <div>
                 <Label htmlFor="scope">Scope</Label>
                 <select
@@ -168,7 +233,7 @@ export default async function MemoryDetailPage({
         )}
       </Card>
 
-      {!isEditing ? (
+      {!isEditing && canWrite ? (
         <form action={deleteMemoryAction} className="flex justify-end">
           <input type="hidden" name="id" value={m.id} />
           <Button type="submit" variant="danger" size="sm">
