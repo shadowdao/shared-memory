@@ -220,11 +220,20 @@ export async function putSnippet(
     if (owned) {
       projectId = owned;
     } else {
-      const sharedRow = await db
-        .select({ id: projects.id })
-        .from(projects)
-        .where(eq(projects.key, projectKey))
-        .limit(1);
+      // Restrict by-key lookup to projects the user can actually read —
+      // `projects.key` is unique per user, not globally, so an unscoped
+      // match could resolve another user's project entirely.
+      const readableIds = await readableProjectIds(userId, groupNames);
+      const sharedRow =
+        readableIds.length > 0
+          ? await db
+              .select({ id: projects.id })
+              .from(projects)
+              .where(
+                and(eq(projects.key, projectKey), inArray(projects.id, readableIds)),
+              )
+              .limit(1)
+          : [];
       if (sharedRow[0]) {
         const allowed = await canWriteProject(userId, groupNames, sharedRow[0].id);
         if (!allowed) {
@@ -386,9 +395,10 @@ export async function softDeleteSnippet(
     scope?: "project" | "user";
     projectKey?: string;
     groupNames?: string[];
+    version?: number;
   },
 ): Promise<{ id: string; scope: "project" | "user"; projectKey: string | null } | null> {
-  const { groupNames = [] } = args;
+  const { groupNames = [], version } = args;
   const target = await getSnippet(userId, args);
   if (!target) return null;
 
@@ -403,10 +413,19 @@ export async function softDeleteSnippet(
     if (!allowed) throw new Error("you don't have write access to this project");
   }
 
-  await db
+  // CAS on version so a peer's concurrent edit can't be silently dropped
+  // by this delete. Caller-supplied version wins; else we use the version
+  // we just read in `getSnippet` for in-handler consistency.
+  const expectedVersion = version ?? target.version;
+  const updated = await db
     .update(snippets)
     .set({ deletedAt: new Date(), lastEditedBy: userId })
-    .where(eq(snippets.id, target.id));
+    .where(and(eq(snippets.id, target.id), eq(snippets.version, expectedVersion)))
+    .returning({ id: snippets.id });
+
+  if (!updated[0]) {
+    throw new Error(CONCURRENT_EDIT_ERROR_SNIPPET);
+  }
 
   return {
     id: target.id,

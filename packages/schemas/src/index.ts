@@ -47,6 +47,15 @@ export const MemoryIdInput = z.object({
 });
 export type MemoryIdInput = z.infer<typeof MemoryIdInput>;
 
+// memory.delete may CAS on `version` to avoid clobbering a concurrent edit
+// (shared projects allow co-edit, so the version a caller observed at
+// load time can race a peer's update).
+export const MemoryDeleteInput = z.object({
+  id: z.string().uuid(),
+  version: z.number().int().nonnegative().optional(),
+});
+export type MemoryDeleteInput = z.infer<typeof MemoryDeleteInput>;
+
 export const MemoryUpdateInput = z.object({
   id: z.string().uuid(),
   content: MemoryContent.optional(),
@@ -161,6 +170,8 @@ export const SnippetDeleteInput = z
     name: SnippetName,
     scope: MemoryScope.optional(),
     project: ProjectKey.optional(),
+    // Optional CAS for co-edit safety on shared snippets.
+    version: z.number().int().nonnegative().optional(),
   })
   .refine(scopeProjectRefinement.check, { message: scopeProjectRefinement.message });
 export type SnippetDeleteInput = z.infer<typeof SnippetDeleteInput>;

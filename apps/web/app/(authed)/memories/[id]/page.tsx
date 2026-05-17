@@ -236,6 +236,7 @@ export default async function MemoryDetailPage({
       {!isEditing && canWrite ? (
         <form action={deleteMemoryAction} className="flex justify-end">
           <input type="hidden" name="id" value={m.id} />
+          <input type="hidden" name="version" value={m.version} />
           <Button type="submit" variant="danger" size="sm">
             Delete memory
           </Button>

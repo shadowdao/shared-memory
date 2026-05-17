@@ -9,6 +9,7 @@ import {
 } from "@/lib/db/schema";
 import {
   MemoryIdInput,
+  MemoryDeleteInput,
   MemoryListInput,
   MemorySearchInput,
   MemoryUpdateInput,
@@ -496,25 +497,33 @@ const memoryGet: ToolDef = {
 const memoryDelete: ToolDef = {
   name: "memory.delete",
   description:
-    "Soft-delete a memory when it becomes stale or wrong — e.g., the user changes a preference, or a fact you saved turns out to be incorrect. ALWAYS prefer memory.update over delete-then-write for content corrections; only delete when the memory genuinely shouldn't exist anymore. Soft delete preserves the audit trail.",
+    "Soft-delete a memory when it becomes stale or wrong — e.g., the user changes a preference, or a fact you saved turns out to be incorrect. ALWAYS prefer memory.update over delete-then-write for content corrections; only delete when the memory genuinely shouldn't exist anymore. Soft delete preserves the audit trail. Pass `version` (returned by memory.get / memory.list) to detect concurrent edits — in shared projects another member may have updated the row since you read it.",
   inputSchema: {
     type: "object",
-    properties: { id: { type: "string", format: "uuid" } },
+    properties: {
+      id: { type: "string", format: "uuid" },
+      version: {
+        type: "integer",
+        minimum: 0,
+        description:
+          "If supplied, the delete fails with a concurrent-edit error when the row's current version doesn't match. Recommended for shared projects.",
+      },
+    },
     required: ["id"],
   },
   async handler(args, ctx) {
-    const parsed = MemoryIdInput.safeParse(args);
+    const parsed = MemoryDeleteInput.safeParse(args);
     if (!parsed.success) return err(parsed.error.message);
 
-    // Look up the row first to authorize. We can't rely on a
-    // single-statement WHERE clause because shared-project writes
-    // need a per-project access check.
+    // Look up the row first to authorize and capture its current version
+    // for the CAS. Shared-project writes need a per-project access check.
     const target = await db
       .select({
         id: memories.id,
         userId: memories.userId,
         projectId: memories.projectId,
         scope: memories.scope,
+        version: memories.version,
       })
       .from(memories)
       .where(and(eq(memories.id, parsed.data.id), isNull(memories.deletedAt)))
@@ -530,13 +539,23 @@ const memoryDelete: ToolDef = {
       if (!allowed) return err("no write access to this project");
     }
 
+    // Optimistic-lock CAS: pin to the caller-supplied version when given,
+    // else the version we just read in this handler. The 0-row response
+    // tells us a peer raced us.
+    const expectedVersion = parsed.data.version ?? m.version;
     const updated = await db
       .update(memories)
       .set({ deletedAt: new Date(), lastEditedBy: ctx.userId })
-      .where(and(eq(memories.id, parsed.data.id), isNull(memories.deletedAt)))
+      .where(
+        and(
+          eq(memories.id, parsed.data.id),
+          eq(memories.version, expectedVersion),
+          isNull(memories.deletedAt),
+        ),
+      )
       .returning({ id: memories.id });
 
-    if (!updated[0]) return err("not found");
+    if (!updated[0]) return err(CONCURRENT_EDIT_ERROR);
 
     await db.insert(auditLog).values({
       userId: ctx.userId,
@@ -743,6 +762,9 @@ const memorySearch: ToolDef = {
     }
 
     const topIds = result.hits.map((h) => h.id);
+    // Re-filter on deletedAt — close a tiny TOCTOU window where a row
+    // could be soft-deleted between the visibility-aware search and this
+    // re-fetch. Visibility itself is already enforced by `searchMemories`.
     const rows = await db
       .select({
         id: memories.id,
@@ -756,7 +778,7 @@ const memorySearch: ToolDef = {
         updatedAt: memories.updatedAt,
       })
       .from(memories)
-      .where(inArray(memories.id, topIds));
+      .where(and(inArray(memories.id, topIds), isNull(memories.deletedAt)));
 
     const byId = new Map(rows.map((r) => [r.id, r]));
     const items = result.hits.flatMap((hit) => {
@@ -836,16 +858,11 @@ const snippetPut: ToolDef = {
       return err("scope=project requires `project` (or X-Project-Key header)");
     }
 
-    if (parsed.data.scope === "project") {
-      const exists = await resolveProjectId(ctx, projectKey!);
-      // It's OK for the project not to exist — putSnippet will create
-      // it owned by the caller. But if it DOES exist as a shared
-      // project, we need rw to write through it; the helper enforces
-      // that.
-      void exists;
-    }
-
     try {
+      // Authorization for shared-project writes lives inside putSnippet:
+      // if the project exists and the caller lacks rw access on it, the
+      // helper throws. If the project doesn't exist, the helper creates
+      // it owned by the caller — auto-upsert semantics.
       const { snippet, inserted } = await putSnippet(ctx.userId, {
         name: parsed.data.name,
         body: parsed.data.body,
@@ -996,13 +1013,19 @@ const snippetList: ToolDef = {
 const snippetDelete: ToolDef = {
   name: "snippet.delete",
   description:
-    "Soft-delete a snippet by name when it becomes stale or wrong — e.g., the user revamps a template and the old version shouldn't be reachable anymore. ALWAYS prefer snippet.put with the same name (which replaces in place) over delete-then-put when you're just refining the body. Only delete when the snippet genuinely shouldn't exist. Provide `scope` (and `project` for project-scope) to disambiguate when the same name exists in multiple scopes.",
+    "Soft-delete a snippet by name when it becomes stale or wrong — e.g., the user revamps a template and the old version shouldn't be reachable anymore. ALWAYS prefer snippet.put with the same name (which replaces in place) over delete-then-put when you're just refining the body. Only delete when the snippet genuinely shouldn't exist. Provide `scope` (and `project` for project-scope) to disambiguate when the same name exists in multiple scopes. Pass `version` (returned by snippet.get / snippet.list) to detect concurrent edits on shared-project snippets.",
   inputSchema: {
     type: "object",
     properties: {
       name: { type: "string", description: "Exact snippet name." },
       scope: { type: "string", enum: ["project", "user"] },
       project: { type: "string", description: "Project key (required for scope='project')." },
+      version: {
+        type: "integer",
+        minimum: 0,
+        description:
+          "If supplied, the delete fails with a concurrent-edit error when the row's current version doesn't match. Recommended for shared projects.",
+      },
     },
     required: ["name"],
   },
@@ -1017,6 +1040,7 @@ const snippetDelete: ToolDef = {
         scope: parsed.data.scope,
         projectKey: requestedKey,
         groupNames: ctx.groups,
+        version: parsed.data.version,
       });
       if (!deleted) return err(`snippet '${parsed.data.name}' not found`);
 

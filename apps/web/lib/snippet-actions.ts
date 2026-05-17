@@ -155,10 +155,16 @@ export async function deleteSnippetAction(formData: FormData) {
 
   const scope = formData.get("scope") as "project" | "user" | null;
   const projectRaw = (formData.get("project") as string | null)?.trim();
+  const rawVersion = formData.get("version");
+  const version =
+    typeof rawVersion === "string" && rawVersion.length > 0
+      ? Number.parseInt(rawVersion, 10)
+      : undefined;
   const payload = {
     name: String(formData.get("name") ?? "").trim(),
     scope: scope ?? undefined,
     project: scope === "project" ? projectRaw || undefined : undefined,
+    version: Number.isFinite(version) ? version : undefined,
   };
 
   const parsed = SnippetDeleteInput.safeParse(payload);
@@ -171,6 +177,7 @@ export async function deleteSnippetAction(formData: FormData) {
     scope: parsed.data.scope,
     projectKey: parsed.data.project,
     groupNames,
+    version: parsed.data.version,
   });
   if (!deleted) throw new Error("not found");
 

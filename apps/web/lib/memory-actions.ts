@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { auth } from "@/auth";
 import { db } from "@/lib/db/client";
 import { memories, projects, auditLog } from "@/lib/db/schema";
@@ -11,12 +11,13 @@ import { resolveProjectId, upsertProject } from "@/lib/projects";
 import {
   MemoryWriteInput,
   MemoryUpdateInput,
-  MemoryIdInput,
+  MemoryDeleteInput,
 } from "@shared-memory/schemas";
 import {
   CONCURRENT_EDIT_ERROR,
   canWriteProject,
   getUserGroupNames,
+  readableProjectIds,
 } from "@/lib/access";
 
 /**
@@ -73,11 +74,24 @@ export async function createMemoryAction(formData: FormData) {
     if (owned) {
       projectId = owned;
     } else {
-      const sharedRow = await db
-        .select({ id: projects.id })
-        .from(projects)
-        .where(eq(projects.key, parsed.data.project))
-        .limit(1);
+      // Restrict the by-key lookup to projects the user can actually
+      // read. Without this, a different user's project with the same
+      // key string could be selected (`projects.key` is unique per user,
+      // not globally), opening a cross-user write hazard.
+      const readableIds = await readableProjectIds(userId, groupNames);
+      const sharedRow =
+        readableIds.length > 0
+          ? await db
+              .select({ id: projects.id })
+              .from(projects)
+              .where(
+                and(
+                  eq(projects.key, parsed.data.project),
+                  inArray(projects.id, readableIds),
+                ),
+              )
+              .limit(1)
+          : [];
       if (sharedRow[0]) {
         const allowed = await canWriteProject(userId, groupNames, sharedRow[0].id);
         if (!allowed) {
@@ -218,12 +232,20 @@ export async function updateMemoryAction(formData: FormData) {
       if (existingId) {
         projectId = existingId;
       } else {
-        // Try a shared project with this key.
-        const sharedRow = await db
-          .select({ id: projects.id })
-          .from(projects)
-          .where(eq(projects.key, projectKey))
-          .limit(1);
+        // Restrict the shared-project lookup to projects the user can
+        // actually read (`projects.key` is unique per user, not globally,
+        // so an unscoped key match could resolve another user's project).
+        const readableIds = await readableProjectIds(userId, groupNames);
+        const sharedRow =
+          readableIds.length > 0
+            ? await db
+                .select({ id: projects.id })
+                .from(projects)
+                .where(
+                  and(eq(projects.key, projectKey), inArray(projects.id, readableIds)),
+                )
+                .limit(1)
+            : [];
         if (sharedRow[0]) {
           const allowed = await canWriteProject(userId, groupNames, sharedRow[0].id);
           if (!allowed) {
@@ -299,7 +321,15 @@ export async function deleteMemoryAction(formData: FormData) {
   const userId = await requireUserId();
   const groupNames = await getUserGroupNames(userId);
   const id = String(formData.get("id") ?? "");
-  const parsed = MemoryIdInput.safeParse({ id });
+  const rawVersion = formData.get("version");
+  const version =
+    typeof rawVersion === "string" && rawVersion.length > 0
+      ? Number.parseInt(rawVersion, 10)
+      : undefined;
+  const parsed = MemoryDeleteInput.safeParse({
+    id,
+    version: Number.isFinite(version) ? version : undefined,
+  });
   if (!parsed.success) throw new Error(parsed.error.issues[0]!.message);
 
   // Authorize delete: same rule as update — owner OR rw on the project.
@@ -309,6 +339,7 @@ export async function deleteMemoryAction(formData: FormData) {
       scope: memories.scope,
       projectId: memories.projectId,
       userId: memories.userId,
+      version: memories.version,
     })
     .from(memories)
     .where(and(eq(memories.id, parsed.data.id), isNull(memories.deletedAt)))
@@ -323,13 +354,23 @@ export async function deleteMemoryAction(formData: FormData) {
     if (!allowed) throw new Error("you don't have write access to this project");
   }
 
+  // CAS on version so a peer's concurrent edit can't be silently overwritten
+  // by this delete. Form may or may not supply version; fall back to the row
+  // we just read to keep behaviour deterministic.
+  const expectedVersion = parsed.data.version ?? row.version;
   const updated = await db
     .update(memories)
     .set({ deletedAt: new Date(), lastEditedBy: userId })
-    .where(and(eq(memories.id, parsed.data.id), isNull(memories.deletedAt)))
+    .where(
+      and(
+        eq(memories.id, parsed.data.id),
+        eq(memories.version, expectedVersion),
+        isNull(memories.deletedAt),
+      ),
+    )
     .returning({ id: memories.id });
 
-  if (!updated[0]) throw new Error("not found");
+  if (!updated[0]) throw new Error(CONCURRENT_EDIT_ERROR);
 
   await db.insert(auditLog).values({
     userId,

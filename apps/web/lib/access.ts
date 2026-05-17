@@ -79,13 +79,12 @@ export async function getAccessibleProjects(
     .innerJoin(projects, eq(projects.id, projectShares.projectId))
     .where(inArray(groups.name, groupNames));
 
+  // If two of the user's groups both share the same project at different
+  // levels, keep the strongest: owner > rw > ro. The DB may emit the same
+  // project twice (once per group), so we collapse by taking the max.
   for (const r of shared) {
-    const existing = ownedMap.get(r.projectId);
-    if (existing) continue; // owner already wins
-    // If two of the user's groups both share the same project at
-    // different levels, keep the stronger one (rw beats ro).
     const prior = ownedMap.get(r.projectId);
-    if (prior && prior.access === "rw") continue;
+    if (prior?.access === "owner" || prior?.access === "rw") continue;
     ownedMap.set(r.projectId, {
       projectId: r.projectId,
       access: r.access as "ro" | "rw",

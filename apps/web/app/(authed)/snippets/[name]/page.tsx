@@ -287,6 +287,7 @@ export default async function SnippetDetailPage({
         <form action={deleteSnippetAction} className="flex justify-end">
           <input type="hidden" name="name" value={snippet.name} />
           <input type="hidden" name="scope" value={snippet.scope} />
+          <input type="hidden" name="version" value={snippet.version} />
           {snippet.scope === "project" && snippet.projectKey ? (
             <input type="hidden" name="project" value={snippet.projectKey} />
           ) : null}
