@@ -65,3 +65,75 @@ export const ProjectIdentifyInput = z.object({
   display_name: z.string().min(1).max(200).optional(),
 });
 export type ProjectIdentifyInput = z.infer<typeof ProjectIdentifyInput>;
+
+// =============================================================================
+// Snippets
+//
+// Snippets are named, exactly-reproducible artifacts (templates, formats,
+// checklists). Unlike memories, they're fetched by EXACT name — never
+// searched. They mirror the memory scope/project model so the same key
+// can have a global default plus per-repo variants.
+// =============================================================================
+
+export const SnippetName = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(
+    /^[a-zA-Z0-9._\-/]+$/,
+    "snippet name may only contain alphanumerics, ._-/",
+  );
+export type SnippetName = z.infer<typeof SnippetName>;
+
+export const SnippetBody = z.string().min(1).max(64_000);
+export const SnippetDescription = z.string().max(2_000);
+
+// Shared scope/project consistency: project-scope requires `project`,
+// user-scope forbids it. Matches the DB CHECK constraint and the same
+// refinement used implicitly for memories at the handler level.
+const scopeProjectRefinement = {
+  check: (v: { scope?: "project" | "user"; project?: string }) => {
+    if (v.scope === "project") return Boolean(v.project);
+    if (v.scope === "user") return v.project === undefined;
+    return true;
+  },
+  message: "scope='project' requires `project`; scope='user' forbids `project`",
+};
+
+export const SnippetPutInput = z
+  .object({
+    name: SnippetName,
+    body: SnippetBody,
+    description: SnippetDescription.optional(),
+    tags: Tags.optional(),
+    scope: MemoryScope.default("user"),
+    project: ProjectKey.optional(),
+  })
+  .refine(scopeProjectRefinement.check, { message: scopeProjectRefinement.message });
+export type SnippetPutInput = z.infer<typeof SnippetPutInput>;
+
+export const SnippetGetInput = z
+  .object({
+    name: SnippetName,
+    scope: MemoryScope.optional(),
+    project: ProjectKey.optional(),
+  })
+  .refine(scopeProjectRefinement.check, { message: scopeProjectRefinement.message });
+export type SnippetGetInput = z.infer<typeof SnippetGetInput>;
+
+export const SnippetListInput = z.object({
+  project: ProjectKey.optional(),
+  scope: MemoryScope.optional(),
+  tags: z.array(z.string()).optional(),
+  limit: z.number().int().min(1).max(200).default(50),
+});
+export type SnippetListInput = z.infer<typeof SnippetListInput>;
+
+export const SnippetDeleteInput = z
+  .object({
+    name: SnippetName,
+    scope: MemoryScope.optional(),
+    project: ProjectKey.optional(),
+  })
+  .refine(scopeProjectRefinement.check, { message: scopeProjectRefinement.message });
+export type SnippetDeleteInput = z.infer<typeof SnippetDeleteInput>;
