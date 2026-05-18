@@ -183,6 +183,12 @@ export default async function ProjectDetailPage({
             <Link href="/projects" className="no-underline">
               <Button type="button" variant="secondary">All projects</Button>
             </Link>
+            <Link
+              href={`/projects/${encodeURIComponent(project.key)}/activity`}
+              className="no-underline"
+            >
+              <Button type="button" variant="secondary">Activity</Button>
+            </Link>
             {canWrite ? (
               <Link
                 href={`/memories/new?project=${encodeURIComponent(project.key)}`}
