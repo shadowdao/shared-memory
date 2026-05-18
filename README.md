@@ -83,6 +83,25 @@ docker compose --profile tls up -d
 Caddy reads `APP_HOSTNAME` and `ACME_EMAIL` from `.env` and proxies to the
 app on the internal Docker network.
 
+### Mode C — AWS Fargate (Terraform)
+
+For deployments where docker-compose on a VM isn't a fit (multi-AZ HA,
+managed RDS, no host to babysit), the [`terraform/`](terraform/) directory
+ships a module that wires the same three components into ECS Fargate
+behind an ALB:
+
+```bash
+cd terraform/examples/basic
+$EDITOR main.tf terraform.tfvars   # plug in your VPC, RDS, ACM, ECR, OIDC
+terraform init && terraform apply
+```
+
+You bring the VPC, RDS Postgres, ACM cert, ECR images, and OIDC clients;
+the module brings ECS, ALB, EFS (for the embedder model cache), Secrets
+Manager, IAM, CloudWatch, and Service Connect for app↔embedder discovery.
+Full walkthrough in [`terraform/README.md`](terraform/README.md), including
+the post-apply migrator invocation and DNS setup.
+
 ---
 
 ## Quick start
