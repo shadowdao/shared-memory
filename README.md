@@ -133,6 +133,77 @@ Mode column: **A** = external proxy (default), **B** = built-in Caddy TLS.
 
 ---
 
+## External Postgres (RDS, Cloud SQL, etc.)
+
+By default the compose stack runs a bundled `pgvector/pgvector:pg16` container
+with its data on a Docker volume. For production deployments you may prefer
+a managed Postgres (AWS RDS, GCP Cloud SQL, Azure Database for PostgreSQL,
+…). An opt-in override file disables the bundled `db` service and lets the
+app point at any reachable Postgres.
+
+### When to use
+
+- You already have a managed Postgres you trust (point-in-time recovery,
+  automated snapshots, monitoring, IAM, etc.).
+- You want to scale the database independently of the app host.
+- Compliance / data-residency rules require the DB to live elsewhere.
+
+If none of that applies, the bundled `db` is fine — keep using
+`docker compose up -d` and skip this section.
+
+### Connection requirements
+
+- The DB must be reachable from wherever the app runs (security group /
+  firewall / VPC peering / private link as appropriate).
+- SSL is strongly recommended. For RDS append `?sslmode=require` to the URL.
+- The DB user needs enough privileges on first boot to install extensions
+  (`pgvector`, `pg_trgm`, `pgcrypto`). The migrator runs
+  `CREATE EXTENSION IF NOT EXISTS` for each — on RDS the user needs the
+  `rds_superuser` role, or have an admin pre-create the extensions and
+  grant the app's user `USAGE` on them.
+
+### Extension requirements
+
+- **pgvector** — vector search. RDS Postgres ≥ 15.5 ships pgvector as a
+  trusted extension; 16.x (what this project targets) supports it out of
+  the box. Cloud SQL and Azure Database for PostgreSQL also expose it as
+  a flagged / configurable extension.
+- **pg_trgm** — trigram index for hybrid lexical search.
+- **pgcrypto** — `gen_random_uuid()` for ID generation.
+
+### Compose invocation
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.external-db.yml up -d
+```
+
+Set `DATABASE_URL` in `.env` to your managed-DB connection string before
+running this — the `POSTGRES_*` variables are no longer consulted in this
+mode. See `.env.example` for the RDS-style example URL.
+
+Combine with the built-in TLS profile if you want Caddy as well:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.external-db.yml --profile tls up -d
+```
+
+### What about backups?
+
+You give up the `db_data` volume (which you'd back up with whatever volume
+backup story you already use) and inherit your managed provider's backup
+story instead — RDS automated snapshots + point-in-time recovery, Cloud SQL
+automated backups, Azure server-level backups, etc. In practice this is the
+main reason to switch: pushing backup-and-restore to a managed service that
+already does it well.
+
+### AWS Fargate / managed deploy
+
+For a fully-managed deployment (Fargate app + RDS DB, no Docker host of
+your own), see [`terraform/README.md`](terraform/README.md) for an
+opinionated Terraform module that wires it all up.
+
+---
+
 ## OIDC provider setup
 
 You need **two** OAuth2 / OIDC clients on your identity provider:

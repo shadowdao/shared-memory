@@ -1,0 +1,54 @@
+# =============================================================================
+# shared-memory — external Postgres override.
+#
+# Use this override when you want to point the app at a managed Postgres
+# (AWS RDS, GCP Cloud SQL, Azure Database for PostgreSQL, your own VM, ...)
+# instead of the bundled `db` container.
+#
+# Invocation (always together with the base file):
+#
+#     docker compose -f docker-compose.yml -f docker-compose.external-db.yml up -d
+#
+# The caller MUST set `DATABASE_URL` explicitly in `.env` so that `migrator`
+# and `app` know where to connect. The `POSTGRES_*` variables are not used
+# in this mode (the bundled `db` service is disabled below). Example:
+#
+#     DATABASE_URL=postgres://memory:STRONG_PASSWORD@your-rds.region.rds.amazonaws.com:5432/memory?sslmode=require
+#
+# The DB user needs privileges to `CREATE EXTENSION` for pgvector, pg_trgm,
+# and pgcrypto on first run — on RDS that means the `rds_superuser` role, or
+# pre-create the extensions yourself. See README "External Postgres".
+# =============================================================================
+
+services:
+  db:
+    # Park the bundled DB on a profile that nothing ever enables. Compose
+    # only starts services whose profile list is empty OR matches a
+    # `--profile` flag on the command line. "never" is not a magic name —
+    # it's just a label we promise not to pass, so the service stays down.
+    profiles: ["never"]
+
+  migrator:
+    # Docker compose merges `depends_on` by key — listing `embedder` here
+    # alone would keep the base file's `db` entry and break with
+    # "depends on undefined service db". The `!override` tag (compose 2.24+)
+    # replaces the whole block instead of merging.
+    depends_on: !override
+      embedder:
+        condition: service_healthy
+    environment:
+      # The base file hardcodes DATABASE_URL to point at the bundled `db`
+      # service. Override it to pass through whatever the operator set in
+      # `.env` (e.g. an RDS endpoint with sslmode=require).
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL not set in .env (required with external-db override)}
+
+  app:
+    # Same merge caveat as above — fully replace the block, keep embedder
+    # and migrator deps.
+    depends_on: !override
+      embedder:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL not set in .env (required with external-db override)}
