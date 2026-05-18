@@ -201,6 +201,26 @@ export default async function ProjectDetailPage({
         }
       />
 
+      <Card className="mb-6">
+        <CardHeader className="flex items-center justify-between">
+          <span className="text-sm font-medium">Auto-identify this project</span>
+          <span className="text-xs text-fg-subtle">.shared-memory-project</span>
+        </CardHeader>
+        <CardBody className="space-y-2 text-sm">
+          <p className="text-fg-muted">
+            Commit a one-line text file at the repo root so every Claude Code
+            session opened in this repo automatically targets this project —
+            no per-machine config needed.
+          </p>
+          <pre className="!whitespace-pre-wrap text-xs">{`echo "${project.key}" > .shared-memory-project`}</pre>
+          <p className="text-xs text-fg-subtle">
+            Commit it. The directive tool descriptions tell Claude to read this
+            file at session start before falling back to inference or the
+            <code className="mx-1">X-Project-Key</code>header.
+          </p>
+        </CardBody>
+      </Card>
+
       {shareRows.length > 0 || isOwner ? (
         <Card className="mb-6">
           <CardHeader className="flex items-center justify-between">

@@ -302,6 +302,47 @@ to `/plugin install shared-memory`. Other IdPs that already support DCR
 
 ---
 
+## Identifying the current project (`.shared-memory-project`)
+
+When Claude Code calls memory.write / memory.search / etc., the server needs
+to know *which* project the call belongs to. Resolution order, first match
+wins:
+
+1. **Explicit `project` argument** on the tool call.
+2. **`.shared-memory-project` file** at the repo root — a single line of
+   plain text containing the project key. Claude is instructed to read this
+   first when a project context is present, before inferring or asking. This
+   is the recommended path for any repo: commit the file, and every
+   collaborator's Claude Code automatically attaches memories to the same
+   shared project.
+3. **`X-Project-Key` request header** — per-MCP-registration default, set at
+   `claude mcp add` time with `--header "X-Project-Key: foo"`. Useful when a
+   machine works in one project across many repos.
+4. **Inference** — repo name / git remote slug / working-directory basename,
+   as a last resort.
+
+### Adding `.shared-memory-project` to your repo
+
+```bash
+echo "your-project-key" > .shared-memory-project
+git add .shared-memory-project
+git commit -m "chore: declare shared-memory project key"
+```
+
+The key must match the regex `^[a-zA-Z0-9._\-/]+$` (same constraint as the
+`ProjectKey` Zod schema — alphanumerics plus `.`, `_`, `-`, `/`). Pick
+something stable; renaming later is fine but breaks the implicit link with
+any pre-existing memories you wrote against the old key.
+
+### Why a flat-text file, not JSON
+
+Matches the family of `.python-version`, `.nvmrc`, `.tool-versions` — easy
+to grep, easy to author by hand, easy to read from any client without a
+parser. If we ever need richer metadata (display name, default tags, etc.)
+we'd graduate to a structured format, but the single-key case is the 95%.
+
+---
+
 ## HAProxy example
 
 If you run HAProxy at the edge (TLS terminator + reverse proxy), a minimal
