@@ -29,6 +29,12 @@ export interface SearchFilters {
    * shared visibility) — pass through `UserContext.groups`.
    */
   groupNames?: string[];
+  /**
+   * Minimum RRF score a hit must clear. Default `undefined` = no extra
+   * filter (current behavior — every fused result is returned). Set to
+   * e.g. 0.025 to require at least two rankers to fire at rank 1.
+   */
+  minScore?: number;
 }
 
 export interface SearchHit {
@@ -93,7 +99,7 @@ export async function searchMemories(
   filters: SearchFilters = {},
   limit = 20,
 ): Promise<SearchResult> {
-  const { scope, projectKey, tags, groupNames = [] } = filters;
+  const { scope, projectKey, tags, groupNames = [], minScore } = filters;
   const projectId = projectKey
     ? await resolveProjectIdForKey(userId, groupNames, projectKey)
     : null;
@@ -178,7 +184,11 @@ export async function searchMemories(
   fts.forEach((h, i) => accum(h.id, i + 1, "ftsRank"));
   tag.forEach((h, i) => accum(h.id, i + 1, "tagRank"));
 
-  const hits = [...scores.entries()]
+  let entries = [...scores.entries()];
+  if (typeof minScore === "number" && minScore > 0) {
+    entries = entries.filter(([, r]) => r.rrfScore >= minScore);
+  }
+  const hits = entries
     .sort(([, a], [, b]) => b.rrfScore - a.rrfScore)
     .slice(0, limit)
     .map(([id, rank]) => ({

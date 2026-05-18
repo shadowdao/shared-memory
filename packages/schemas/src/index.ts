@@ -90,6 +90,15 @@ export const MemorySearchInput = z.object({
   scope: MemoryScope.optional(),
   tags: z.array(z.string()).optional(),
   limit: z.number().int().min(1).max(50).default(10),
+  /**
+   * Minimum Reciprocal Rank Fusion score a result must clear to be
+   * returned. Useful for stricter "high-confidence only" filtering — set
+   * higher than 1/(60+1)≈0.0164 to exclude single-ranker-rank-1 matches
+   * (semantic-only hits with no FTS/tag corroboration), or to ~0.03 to
+   * require at least two rankers to fire at rank 1. Omit / set 0 for the
+   * unfiltered default.
+   */
+  minScore: z.number().min(0).max(1).optional(),
 });
 export type MemorySearchInput = z.infer<typeof MemorySearchInput>;
 

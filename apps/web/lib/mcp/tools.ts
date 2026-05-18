@@ -736,6 +736,13 @@ const memorySearch: ToolDef = {
       scope: { type: "string", enum: ["project", "user"] },
       tags: { type: "array", items: { type: "string" }, description: "Boost results with these tags." },
       limit: { type: "integer", minimum: 1, maximum: 50, default: 10 },
+      minScore: {
+        type: "number",
+        minimum: 0,
+        maximum: 1,
+        description:
+          "Optional minimum Reciprocal Rank Fusion score for a hit to be returned. Default unset = no extra filter (every fused result returned). Set ~0.025 to require at least two rankers (vector + FTS, or +tag) to fire at rank 1, filtering out weak vector-only matches. The per-source ranks in each result are still the primary way to judge confidence.",
+      },
     },
     required: ["query"],
   },
@@ -743,7 +750,7 @@ const memorySearch: ToolDef = {
     const parsed = MemorySearchInput.safeParse(withDefaultProject(args, ctx));
     if (!parsed.success) return err(parsed.error.message);
 
-    const { query, scope, tags, limit } = parsed.data;
+    const { query, scope, tags, limit, minScore } = parsed.data;
     const requestedKey = projectKeyOrDefault(ctx, parsed.data.project);
     const projectId = requestedKey ? await resolveProjectId(ctx, requestedKey) : null;
     if (requestedKey && !projectId) {
@@ -753,7 +760,7 @@ const memorySearch: ToolDef = {
     const result = await searchMemories(
       ctx.userId,
       query,
-      { scope, projectKey: requestedKey, tags, groupNames: ctx.groups },
+      { scope, projectKey: requestedKey, tags, groupNames: ctx.groups, minScore },
       limit,
     );
 
