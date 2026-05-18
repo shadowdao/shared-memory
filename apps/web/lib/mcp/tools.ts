@@ -156,7 +156,7 @@ function withDefaultProject(
 const projectIdentify: ToolDef = {
   name: "project.identify",
   description:
-    "Call ONCE near the start of every session that has a project context — a repo you're working in, a service you're debugging, etc. — to register or look up that project so subsequent project-scoped memories attach correctly. **Look up the key in this order:** (1) `.shared-memory-project` at the repo root (single-line text file with just the project key; walk up from cwd to find it — same lookup style as `.gitignore` / `.nvmrc`). (2) If no file, fall back to a stable inference: repo name, git remote slug, or working directory basename. The file convention exists so teams sharing a repo all hit the same shared project automatically — prefer it over guessing. Returns shared projects you have access to in addition to your own; when an owned and a shared project would both match the same key, the owned one wins (a server-side warning is logged so the collision is debuggable). Skip if the work is purely scratch / not tied to a specific codebase.",
+    "Call ONCE near the start of every session that has a project context — a repo you're working in, a service you're debugging, etc. — to register or look up that project so subsequent project-scoped memories attach correctly. **Look up the key in this order:** (1) `.shared-memory-project` at the repo root (single-line text file with just the project key; walk up from cwd to find it — same lookup style as `.gitignore` / `.nvmrc`). (2) If no file, fall back to a stable inference: repo name, git remote slug, or working directory basename. The file convention exists so teams sharing a repo all hit the same shared project automatically — prefer it over guessing. **Pass `source` based on how you resolved the key** — 'file', 'explicit', 'header', or 'inferred' — so the server can decide whether to suggest the user create `.shared-memory-project`. If the response carries a `setupHint`, briefly relay its `message` and `command` to the user (one short sentence, don't over-explain — they'll decide). Returns shared projects you have access to in addition to your own; when an owned and a shared project would both match the same key, the owned one wins (a server-side warning is logged so the collision is debuggable). Skip if the work is purely scratch / not tied to a specific codebase.",
   inputSchema: {
     type: "object",
     properties: {
@@ -168,6 +168,12 @@ const projectIdentify: ToolDef = {
       display_name: {
         type: "string",
         description: "Human-readable name shown in the Web UI. Optional.",
+      },
+      source: {
+        type: "string",
+        enum: ["file", "explicit", "header", "inferred"],
+        description:
+          "How you resolved the project key. Pass 'file' when you read it from `.shared-memory-project`, 'explicit' when the user named it, 'header' when you used the X-Project-Key default, or 'inferred' when you guessed from repo/cwd. Anything but 'file' may surface a setupHint in the response.",
       },
     },
     required: ["key"],
@@ -259,6 +265,7 @@ const projectIdentify: ToolDef = {
           shared: false,
           access: "owner" as const,
           readOnly: false,
+          ...buildSetupHint(parsed.data.key, parsed.data.source),
         },
         `project ${ownedRow[0].key} (${ownedRow[0].id})`,
       );
@@ -308,11 +315,33 @@ const projectIdentify: ToolDef = {
         shared: false,
         access: "owner" as const,
         readOnly: false,
+        ...buildSetupHint(p.key, parsed.data.source),
       },
       `project ${p.key} (${p.id})`,
     );
   },
 };
+
+/**
+ * Returns a `setupHint` field when the caller resolved the project key
+ * by anything OTHER than reading `.shared-memory-project`. Surfaces a
+ * copy-pasteable command + a short message Claude is told to relay to
+ * the user. Spreading `{}` from a "no hint needed" branch is the
+ * cleanest way to conditionally add the field without nullish noise.
+ */
+function buildSetupHint(
+  projectKey: string,
+  source: ProjectIdentifyInput["source"],
+): { setupHint?: { message: string; command: string } } {
+  if (source === "file") return {};
+  return {
+    setupHint: {
+      message:
+        "This repo doesn't appear to have a `.shared-memory-project` file. Committing one ties every collaborator's Claude Code to the same shared project automatically — no per-machine config. Want me to commit it?",
+      command: `echo "${projectKey}" > .shared-memory-project`,
+    },
+  };
+}
 
 const memoryWrite: ToolDef = {
   name: "memory.write",

@@ -105,6 +105,18 @@ export type MemorySearchInput = z.infer<typeof MemorySearchInput>;
 export const ProjectIdentifyInput = z.object({
   key: ProjectKey,
   display_name: z.string().min(1).max(200).optional(),
+  /**
+   * How the caller resolved this project key. The server uses this to
+   * decide whether to include a `setupHint` in the response suggesting
+   * the user commit a `.shared-memory-project` file:
+   *   - 'file'     — already from .shared-memory-project; no hint needed
+   *   - 'explicit' — user named the project in-conversation; hint shown
+   *   - 'header'   — X-Project-Key fallback; hint shown
+   *   - 'inferred' — guessed from repo/cwd; hint shown
+   *
+   * Omitting the field is treated as 'inferred'.
+   */
+  source: z.enum(["file", "explicit", "header", "inferred"]).optional(),
 });
 export type ProjectIdentifyInput = z.infer<typeof ProjectIdentifyInput>;
 
