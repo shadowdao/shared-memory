@@ -18,6 +18,13 @@
 # The DB user needs privileges to `CREATE EXTENSION` for pgvector, pg_trgm,
 # and pgcrypto on first run — on RDS that means the `rds_superuser` role, or
 # pre-create the extensions yourself. See README "External Postgres".
+#
+# REQUIRES DOCKER COMPOSE >= 2.24.0 (Docker Desktop >= 4.25, or Compose plugin
+# 2.24.0+). The `!override` YAML tag on the depends_on blocks below is what
+# fully replaces — rather than merges — the base file's `depends_on: db`
+# entries. On older Compose the tag is silently ignored, the `db` dependency
+# survives the merge, and startup fails with "depends on undefined service
+# db". Check with: docker compose version
 # =============================================================================
 
 services:

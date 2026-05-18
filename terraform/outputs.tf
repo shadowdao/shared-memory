@@ -84,6 +84,7 @@ output "private_subnet_ids_for_run_task" {
 }
 
 output "secret_arns" {
-  description = "Map of env-var name to Secrets Manager ARN. For visibility only — do not re-feed back into the module."
+  description = "Map of env-var name to Secrets Manager ARN. For visibility only — do not re-feed back into the module. Marked sensitive so the secret names don't print in `terraform apply` stdout or CI logs."
   value       = local.secret_arns
+  sensitive   = true
 }

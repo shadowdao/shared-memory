@@ -61,6 +61,7 @@ locals {
     { name = "EMBEDDER_URL", value = "http://embedder:${local.embedder_port}" },
     { name = "EMBEDDING_MODEL", value = var.embedding_model },
     { name = "EMBEDDING_DIM", value = tostring(var.embedding_dim) },
+    { name = "NEXT_TELEMETRY_DISABLED", value = "1" },
   ]
 
   # `secrets` block format that ECS expects: name = env-var name, valueFrom
@@ -73,6 +74,12 @@ locals {
   ]
 
   embedder_environment = [
+    # awsvpc network mode gives every task its own ENI — bind to 0.0.0.0
+    # explicitly so Service Connect reaches the embedder on the task's
+    # ENI address. Default Node servers often bind 127.0.0.1, which
+    # would silently make every app→embedder call time out.
+    { name = "HOST", value = "0.0.0.0" },
+    { name = "PORT", value = tostring(local.embedder_port) },
     { name = "LOG_LEVEL", value = var.log_level },
     { name = "EMBEDDING_MODEL", value = var.embedding_model },
     { name = "EMBEDDING_DIM", value = tostring(var.embedding_dim) },
@@ -272,7 +279,7 @@ resource "aws_ecs_service" "embedder" {
   task_definition        = aws_ecs_task_definition.embedder.arn
   desired_count          = var.embedder_desired_count
   launch_type            = "FARGATE"
-  enable_execute_command = true
+  enable_execute_command = var.enable_execute_command
 
   network_configuration {
     subnets          = var.private_subnet_ids
@@ -322,7 +329,7 @@ resource "aws_ecs_service" "app" {
   task_definition        = aws_ecs_task_definition.app.arn
   desired_count          = var.app_desired_count
   launch_type            = "FARGATE"
-  enable_execute_command = true
+  enable_execute_command = var.enable_execute_command
 
   network_configuration {
     subnets          = var.private_subnet_ids

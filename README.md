@@ -44,7 +44,8 @@ memories are scoped per user.
 
 ## Prerequisites
 
-- A host with **Docker** and **Docker Compose v2** installed.
+- A host with **Docker** and **Docker Compose v2** installed (≥ 2.24.0 if you
+  plan to use the [external Postgres override](#external-postgres-rds-cloud-sql-etc)).
 - An **OIDC identity provider** you control (Authentik, EntraID, Keycloak,
   Okta, Auth0, Zitadel, …). The setup walkthrough below uses Authentik
   because that's what we run; other IdPs need equivalent settings.

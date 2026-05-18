@@ -51,4 +51,5 @@ output "migrator_log_group_name" {
 output "secret_arns" {
   description = "Visibility into where the module stored its secrets."
   value       = module.shared_memory.secret_arns
+  sensitive   = true
 }

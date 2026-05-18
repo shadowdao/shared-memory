@@ -190,6 +190,22 @@ variable "log_retention_days" {
   default     = 14
 }
 
+variable "enable_execute_command" {
+  description = <<-EOT
+    Enable AWS ECS Execute Command on the app + embedder services. When true,
+    operators with the appropriate IAM permission can `aws ecs execute-command`
+    into a running task — useful for debugging, dangerous as a standing
+    posture (any principal with `ecs:ExecuteCommand` on these services gets a
+    shell inside the container). Defaults `false`. Flip to `true` for an
+    incident, then back to `false` and re-apply when done.
+
+    When enabled, the module also attaches the SSM messages policy to both
+    task roles so the feature actually works.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "tags" {
   description = "Tags merged onto every resource the module creates."
   type        = map(string)

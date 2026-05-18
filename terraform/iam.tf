@@ -67,3 +67,38 @@ resource "aws_iam_role" "migrator_task" {
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
   tags               = local.tags
 }
+
+# ---- ECS Execute Command (opt-in via var.enable_execute_command) ----
+#
+# When the operator flips this on for incident debugging, the task role
+# needs the SSM messages permissions for the channel to open. We attach
+# the policy conditionally to both app and embedder task roles — the
+# migrator is short-lived and doesn't get exec.
+
+data "aws_iam_policy_document" "exec_command" {
+  count = var.enable_execute_command ? 1 : 0
+  statement {
+    sid = "AllowECSExecuteCommand"
+    actions = [
+      "ssmmessages:CreateControlChannel",
+      "ssmmessages:CreateDataChannel",
+      "ssmmessages:OpenControlChannel",
+      "ssmmessages:OpenDataChannel",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "app_exec_command" {
+  count  = var.enable_execute_command ? 1 : 0
+  name   = "${var.name_prefix}-app-exec-command"
+  role   = aws_iam_role.app_task.id
+  policy = data.aws_iam_policy_document.exec_command[0].json
+}
+
+resource "aws_iam_role_policy" "embedder_exec_command" {
+  count  = var.enable_execute_command ? 1 : 0
+  name   = "${var.name_prefix}-embedder-exec-command"
+  role   = aws_iam_role.embedder_task.id
+  policy = data.aws_iam_policy_document.exec_command[0].json
+}
