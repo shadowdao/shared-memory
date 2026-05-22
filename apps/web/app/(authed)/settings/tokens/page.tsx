@@ -1,6 +1,7 @@
 import { revalidatePath } from "next/cache";
 import { and, asc, desc, eq, isNull } from "drizzle-orm";
 import { auth } from "@/auth";
+import { env } from "@/lib/env";
 import { db } from "@/lib/db/client";
 import { cliTokens, projects, users } from "@/lib/db/schema";
 import {
@@ -156,6 +157,7 @@ export default async function TokensPage() {
               key: p.key,
               displayName: p.displayName,
             }))}
+            publicUrl={env().PUBLIC_URL}
           />
         </CardBody>
       </Card>

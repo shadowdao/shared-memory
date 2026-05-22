@@ -28,11 +28,12 @@ interface Props {
   action: (prev: CreateTokenState, formData: FormData) => Promise<CreateTokenState>;
   ttlDays: number;
   projects: ProjectOption[];
+  publicUrl: string;
 }
 
 const initial: CreateTokenState = { token: null, error: null, projectKey: null };
 
-export default function TokensManager({ action, ttlDays, projects }: Props) {
+export default function TokensManager({ action, ttlDays, projects, publicUrl }: Props) {
   const [state, formAction, pending] = useActionState(action, initial);
 
   if (state.token) {
@@ -49,7 +50,7 @@ export default function TokensManager({ action, ttlDays, projects }: Props) {
         </pre>
         <details className="text-xs text-fg-muted">
           <summary className="cursor-pointer">claude mcp add command</summary>
-          <pre className="mt-2">{buildMcpAddSnippet(state.token, state.projectKey)}</pre>
+          <pre className="mt-2">{buildMcpAddSnippet(state.token, state.projectKey, publicUrl)}</pre>
         </details>
         <p className="text-xs text-fg-subtle">
           Valid for {ttlDays} days. Revoke individually below if it leaks.
@@ -120,14 +121,19 @@ function ProjectSelect({ projects }: { projects: ProjectOption[] }) {
   );
 }
 
-function buildMcpAddSnippet(token: string, projectKey: string | null): string {
+function buildMcpAddSnippet(
+  token: string,
+  projectKey: string | null,
+  publicUrl: string,
+): string {
   const headerLines = [`  --header "Authorization: Bearer ${token}"`];
   if (projectKey) {
     headerLines.push(`  --header "X-Project-Key: ${projectKey}"`);
   }
+  const base = publicUrl.replace(/\/+$/, "");
   return [
     "claude mcp add --transport http --scope user \\",
     ...headerLines.map((l) => `${l} \\`),
-    "  shared-memory https://memory.dnspegasus.net/api/mcp",
+    `  shared-memory ${base}/api/mcp`,
   ].join("\n");
 }

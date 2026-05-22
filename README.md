@@ -134,7 +134,7 @@ Copy `.env.example` and fill in the values below.
 
 | Variable | Mode | What it is |
 |---|---|---|
-| `PUBLIC_URL` | both | Full external URL of this app, e.g. `https://memory.dnspegasus.net`. Used by Auth.js for callbacks and by the MCP route for resource metadata. |
+| `PUBLIC_URL` | both | Full external URL of this app, e.g. `https://memory.example.com`. Used by Auth.js for callbacks and by the MCP route for resource metadata. |
 | `APP_PORT` | A | Host port the app listens on for the external proxy. Default `3000`. |
 | `APP_BIND` | A | Interface to bind on. Use `127.0.0.1` to only accept traffic from a proxy on the same host. Default `0.0.0.0`. |
 | `APP_HOSTNAME` | B | Hostname only (no scheme). Caddy uses it for the TLS site block. |
@@ -257,7 +257,7 @@ shape is the same on any OIDC provider; the UI labels differ:
 - **Client Secret:** auto-generated → copy to `.env` as `OIDC_CLIENT_SECRET_WEB`
 - **Redirect URIs / Origins:**
   ```
-  https://memory.dnspegasus.net/api/auth/callback/oidc
+  https://memory.example.com/api/auth/callback/oidc
   ```
   (replace with your `PUBLIC_URL`)
 - **Signing Key:** select your `authentik Self-signed Certificate`
@@ -267,7 +267,7 @@ Save. Then **Admin → Applications → Applications → Create**:
 
 - **Name / Slug:** `shared-memory` (the slug becomes the path in the issuer URL)
 - **Provider:** `shared-memory-web`
-- **Launch URL:** `https://memory.dnspegasus.net/`
+- **Launch URL:** `https://memory.example.com/`
 
 The slug is what makes `OIDC_ISSUER` end with `.../application/o/shared-memory/`.
 
@@ -330,7 +330,7 @@ Two paths, in order of preference:
 claude mcp add --transport http --scope user \
   --client-id <OIDC_CLIENT_ID_MCP> \
   --callback-port 33418 \
-  shared-memory https://memory.dnspegasus.net/api/mcp
+  shared-memory https://memory.example.com/api/mcp
 ```
 
 What happens:
@@ -359,23 +359,23 @@ in this case is hosted by *this* server:
 claude mcp add --transport http --scope user \
   --client-id <OIDC_CLIENT_ID_MCP> \
   --callback-port 0 \
-  shared-memory https://memory.dnspegasus.net/api/mcp
+  shared-memory https://memory.example.com/api/mcp
 ```
 
 When the loopback listener times out, Claude Code prompts you to paste the
 callback URL. Open the authorize URL Claude Code printed in your browser,
 sign in, and your IdP redirects to
-`https://memory.dnspegasus.net/auth/cli-callback?code=…`. That page shows
+`https://memory.example.com/auth/cli-callback?code=…`. That page shows
 the `code` and the full URL with copy buttons — paste either back into
 Claude Code's prompt to complete the flow.
 
 The manual-fallback URI must be registered on your MCP client too:
-`https://memory.dnspegasus.net/auth/cli-callback`.
+`https://memory.example.com/auth/cli-callback`.
 
 ### C. Static bearer token (no browser at all)
 
 For fully headless / CI scenarios, mint a long-lived HMAC token at
-`https://memory.dnspegasus.net/connect` and pass it via `--header`. See
+`https://memory.example.com/connect` and pass it via `--header`. See
 the `/connect` page for the exact `claude mcp add` command it generates
 for you.
 
@@ -441,12 +441,12 @@ config for this app looks like:
 
 ```haproxy
 frontend https_in
-    bind *:443 ssl crt /etc/haproxy/certs/memory.dnspegasus.net.pem alpn h2,http/1.1
+    bind *:443 ssl crt /etc/haproxy/certs/memory.example.com.pem alpn h2,http/1.1
     http-request set-header X-Forwarded-Proto https
     http-request set-header X-Forwarded-Host  %[req.hdr(host)]
     http-request set-header X-Forwarded-For   %[src]
 
-    acl host_memory hdr(host) -i memory.dnspegasus.net
+    acl host_memory hdr(host) -i memory.example.com
     use_backend shared_memory if host_memory
 
 backend shared_memory
@@ -464,7 +464,7 @@ Things to verify:
   the OIDC callback URL — without them, the callback may point at
   `http://...:3000` and Authentik will reject it.
 - The Authentik Web-UI provider's **Redirect URI** is the public callback,
-  not the internal one. E.g. `https://memory.dnspegasus.net/api/auth/callback/oidc`.
+  not the internal one. E.g. `https://memory.example.com/api/auth/callback/oidc`.
 
 If your HAProxy lives on a different host than Docker, change `127.0.0.1`
 to the Docker host's address (and confirm `APP_BIND=0.0.0.0` so the port
