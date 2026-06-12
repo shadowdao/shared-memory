@@ -29,7 +29,26 @@ import { cliTokens } from "@/lib/db/schema";
 
 export const CLI_TOKEN_KID = "cli-v1";
 export const CLI_TOKEN_ISSUER = "shared-memory:cli";
-export const CLI_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
+
+// Default lifetime for newly minted CLI tokens. Overridable via the
+// CLI_TOKEN_TTL_DAYS env var (must be a positive integer number of days);
+// anything unset/invalid falls back to this default. Only affects tokens
+// minted from now on — already-issued tokens keep their original `exp`.
+const DEFAULT_CLI_TOKEN_TTL_DAYS = 90;
+
+function cliTokenTtlSeconds(): number {
+  const raw = process.env.CLI_TOKEN_TTL_DAYS;
+  let days = DEFAULT_CLI_TOKEN_TTL_DAYS;
+  if (raw !== undefined && raw.trim() !== "") {
+    const parsed = Number(raw);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      days = parsed;
+    }
+  }
+  return days * 60 * 60 * 24;
+}
+
+export const CLI_TOKEN_TTL_SECONDS = cliTokenTtlSeconds();
 
 function secret(): Uint8Array {
   return new TextEncoder().encode(env().CLI_TOKEN_SECRET);
