@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, arrayContains, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { snippets, projects } from "@/lib/db/schema";
 import type { Snippet } from "@/lib/db/schema";
@@ -349,7 +349,13 @@ export async function listSnippets(
   }
 
   if (tags && tags.length > 0) {
-    where.push(sql`${snippets.tags} @> ${tags}::text[]`);
+    // Require ALL listed tags (array containment). Use Drizzle's
+    // arrayContains so the JS array binds as a single text[] param
+    // (via the column's toDriver) rather than being expanded into
+    // positional params — a raw `${tags}::text[]` template expands to
+    // `($1)::text[]` / `($1,$2)::text[]`, which Postgres rejects as a
+    // malformed array literal / record cast.
+    where.push(arrayContains(snippets.tags, tags));
   }
 
   const rows = await db
