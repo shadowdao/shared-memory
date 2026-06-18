@@ -129,7 +129,11 @@ services:
       # but you can bind to 127.0.0.1 only by setting APP_BIND=127.0.0.1.
       - "${APP_BIND:-0.0.0.0}:${APP_PORT:-3000}:3000"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/health || exit 1"]
+      # Use 127.0.0.1, not localhost: inside the container localhost resolves
+      # to ::1 (IPv6) first, but the Next.js standalone server listens only on
+      # 0.0.0.0 (IPv4), so a localhost probe gets "Connection refused" and the
+      # container is reported unhealthy even though the app serves fine.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
