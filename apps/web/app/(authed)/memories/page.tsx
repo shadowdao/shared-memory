@@ -1,10 +1,15 @@
 import Link from "next/link";
-import { and, desc, eq, isNull, inArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, inArray, or } from "drizzle-orm";
 import { auth } from "@/auth";
 import { db } from "@/lib/db/client";
 import { memories, projects, projectShares } from "@/lib/db/schema";
 import { searchMemories } from "@/lib/memories";
-import { getUserGroupNames, readableProjectIds } from "@/lib/access";
+import {
+  getAccessibleProjects,
+  getUserGroupNames,
+  type AccessibleProject,
+} from "@/lib/access";
+import { ProjectCombobox } from "./_project-combobox";
 import { Container, PageHeader } from "@/app/_components/ui/container";
 import { Card, CardBody } from "@/app/_components/ui/card";
 import { Badge } from "@/app/_components/ui/badge";
@@ -50,12 +55,12 @@ async function fetchMemoriesByIds(
 
 async function listRecent(
   userId: string,
-  groupNames: string[],
+  accessible: AccessibleProject[],
   scope?: Scope,
   project?: string,
 ): Promise<MemoryRow[]> {
   // Visibility: own rows OR rows in an accessible project.
-  const accessibleIds = await readableProjectIds(userId, groupNames);
+  const accessibleIds = accessible.map((p) => p.projectId);
   const visibility =
     accessibleIds.length > 0
       ? or(eq(memories.userId, userId), inArray(memories.projectId, accessibleIds))
@@ -63,17 +68,18 @@ async function listRecent(
   const filters = [visibility!, isNull(memories.deletedAt)];
   if (scope) filters.push(eq(memories.scope, scope));
   if (project) {
-    // Project filter — match the project key against any project the
-    // user can read (owned or shared). When the key matches none of
-    // those, return empty.
-    filters.push(
-      sql`${memories.projectId} IN (
-        SELECT id FROM ${projects}
-        WHERE ${projects.key} = ${project}
-          AND (${projects.userId} = ${userId}
-               OR ${projects.id} = ANY(${accessibleIds}::uuid[]))
-      )`,
-    );
+    // Project filter — resolve the typed key against the projects the
+    // user can read (owned or shared), owned winning on a key collision
+    // to match project.identify / the search path. Filtering by the
+    // resolved id keeps the WHERE clause a plain equality — no raw-SQL
+    // array binding (the source of the earlier memory.list crash). When
+    // the key matches no accessible project, return empty.
+    const matches = accessible.filter((p) => p.projectKey === project);
+    const resolvedId =
+      matches.find((p) => p.access === "owner")?.projectId ??
+      matches[0]?.projectId;
+    if (!resolvedId) return [];
+    filters.push(eq(memories.projectId, resolvedId));
   }
   const rows = await db
     .select({
@@ -120,6 +126,15 @@ export default async function MemoriesPage({
   const scope = params.scope === "user" || params.scope === "project" ? params.scope : undefined;
   const project = params.project?.trim() || undefined;
 
+  // Projects the user can read (owned ∪ shared). Reused both to build the
+  // list-path WHERE clause and to populate the project filter's type-ahead
+  // suggestions. Keys are deduped (a key can appear once per owned/shared
+  // project) and sorted for a stable dropdown order.
+  const accessible = await getAccessibleProjects(userId, groupNames);
+  const projectKeys = [...new Set(accessible.map((p) => p.projectKey))].sort(
+    (a, b) => a.localeCompare(b),
+  );
+
   let rows: MemoryRow[] = [];
   let debug: { vec: number; fts: number; tag: number } | null = null;
 
@@ -138,7 +153,7 @@ export default async function MemoriesPage({
     });
     debug = result.debug;
   } else {
-    rows = await listRecent(userId, groupNames, scope, project);
+    rows = await listRecent(userId, accessible, scope, project);
   }
 
   // Annotate which rows belong to projects that have any active share.
@@ -182,10 +197,10 @@ export default async function MemoriesPage({
           className="flex-1 min-w-[200px]"
         />
         <FilterSelect name="scope" value={scope} options={["", "project", "user"]} placeholder="Any scope" />
-        <Input
+        <ProjectCombobox
           name="project"
-          placeholder="Project key…"
           defaultValue={project ?? ""}
+          options={projectKeys}
           className="w-44"
         />
         <Button type="submit" variant="secondary">Apply</Button>
