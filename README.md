@@ -410,6 +410,25 @@ claude plugin marketplace add https://your-git-host/you/shared-memory.git#instan
 The `#ref` suffix is undocumented in `claude plugin marketplace add --help` but is
 honored and persisted in `known_marketplaces.json` (verified on Claude Code 2.1.220).
 
+**Make that an orphan branch, not a branch off `main`.** `marketplace add` reads
+only the manifests, so the branch needs nothing else:
+
+```bash
+git checkout --orphan instance/<name>
+git rm -rf --cached . && find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+# restore just .claude-plugin/marketplace.json, plugin/.claude-plugin/plugin.json,
+# plugin/.mcp.json — fill in your URL and client ID
+claude plugin validate . && git add -A && git commit && git push
+```
+
+A branch off `main` carries a full copy of the application it has no reason to
+have, so it drifts and someone can cut a stale deploy from it. Worse, syncing it
+means `git merge origin/main`, which **silently replaces those manifests** with
+the placeholders below — no conflict is raised, because only `main` ever touches
+those paths. With no shared history there is nothing to sync and nothing to
+clobber; if the manifest format changes upstream, hand-edit the three files and
+re-run `claude plugin validate .`.
+
 ### B. OAuth flow (manual, per-machine)
 
 ```bash
