@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "dnspegasus",
+  "description": "Self-hosted Claude Code plugins for the dnspegasus.net infrastructure.",
+  "owner": {
+    "name": "jknapp",
+    "url": "https://repo.anhonesthost.net/jknapp/shared-memory"
+  },
+  "plugins": [
+    {
+      "name": "shared-memory",
+      "source": "./plugin",
+      "description": "Shared persistent memory and snippet library for Claude Code sessions, backed by memory.dnspegasus.net and authenticated with Authentik OIDC."
+    }
+  ]
+}
