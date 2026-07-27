@@ -144,6 +144,7 @@ Copy `.env.example` and fill in the values below.
 | `OIDC_CLIENT_SECRET_WEB` | both | Client secret of the Web-UI client. |
 | `OIDC_CLIENT_ID_MCP` | both | Client ID of the MCP resource-server client in your IdP. |
 | `OIDC_AUDIENCE` | both | Audience string the MCP access token must carry in its `aud` claim. Recommended: `shared-memory`. |
+| `OIDC_AUDIENCE_SCOPE` | optional | Name of the IdP scope whose mapping emits that `aud` claim. Advertised in `scopes_supported` so clients request it. Defaults to `aud-<OIDC_AUDIENCE>`. |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | both | Local Postgres credentials. |
 | `NEXTAUTH_SECRET` | both | Session-cookie signing key. Generate with `openssl rand -base64 32`. |
 | `EMBEDDER_URL` | both | Phase 2 embedder sidecar. Leave empty in Phase 1. |
@@ -297,16 +298,33 @@ The MCP endpoint requires the access token's `aud` claim to equal
 reliable pattern:
 
 1. Create a **scope mapping** (Customisation → Property Mappings → Create →
-   Scope Mapping) named `aud-shared-memory` with expression:
+   Scope Mapping) named `aud-shared-memory`, **scope name** `aud-shared-memory`,
+   with expression:
    ```python
    return {"aud": "shared-memory"}
    ```
-2. On the MCP provider, add this scope mapping under **Scopes** and tick it
-   so it's emitted for the default scope.
+2. On the MCP provider, add this scope mapping under **Scopes**.
+3. Make sure the app advertises that scope name. It is derived automatically
+   as `aud-<OIDC_AUDIENCE>`; override with `OIDC_AUDIENCE_SCOPE` if you named
+   the mapping differently.
 
-> If you skip this, the MCP route will return 401 with
-> `error_description="claim invalid: aud"`. Check `docker compose logs app`
-> for the exact failure.
+> **Attaching the mapping is not sufficient.** Authentik evaluates a scope
+> mapping only when the client explicitly *requests* that scope, and an MCP
+> client only requests the scopes listed in `scopes_supported` from
+> `/.well-known/oauth-protected-resource`. If the audience scope isn't
+> advertised there, the mapping silently never runs, the access token carries
+> no `aud`, and every MCP call fails with 401
+> `error_description="claim invalid: aud"` — even though the OAuth handshake,
+> consent, and PKCE all succeeded. Verify with:
+>
+> ```bash
+> curl -s https://memory.example.com/.well-known/oauth-protected-resource \
+>   | jq .scopes_supported     # must include aud-<your audience>
+> ```
+>
+> Note also that Claude Code sends an RFC 8707 `resource` parameter on the
+> authorize request; Authentik 2026.5 ignores it, so it cannot be relied on
+> for audience binding. The scope mapping is what sets `aud`.
 
 Then create an **Application** for the MCP provider (same as Step A), slug
 e.g. `shared-memory-mcp`.

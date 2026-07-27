@@ -18,6 +18,17 @@ const envSchema = z.object({
   OIDC_CLIENT_ID_MCP: z.string().min(1),
   OIDC_AUDIENCE: z.string().min(1),
 
+  // Name of the IdP scope whose mapping emits `aud: <OIDC_AUDIENCE>`.
+  //
+  // Most IdPs (Authentik included) only evaluate a scope mapping when the
+  // client actually requests that scope. The MCP client learns which scopes
+  // to request from `scopes_supported` in our protected-resource metadata,
+  // so this name has to be advertised there or the mapping never runs and
+  // every token arrives without an `aud` claim (-> 401 "claim invalid: aud").
+  //
+  // Defaults to the `aud-<audience>` convention used in the README setup.
+  OIDC_AUDIENCE_SCOPE: z.string().min(1).optional(),
+
   // Database
   DATABASE_URL: z.string().url(),
 
