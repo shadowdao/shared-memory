@@ -29,7 +29,25 @@ const g = globalThis as GlobalWithJwks;
  * application slug, so this is NOT interchangeable with OIDC_ISSUER.
  */
 export function mcpIssuer(): string {
-  return (env().OIDC_ISSUER_MCP ?? env().OIDC_ISSUER).replace(/\/$/, "");
+  return env().OIDC_ISSUER_MCP ?? env().OIDC_ISSUER;
+}
+
+/**
+ * Issuer values accepted for the `iss` claim.
+ *
+ * jose compares `iss` by exact string, and IdPs are inconsistent about the
+ * trailing slash: Authentik emits `.../application/o/<slug>/` while the same
+ * value is routinely configured without it. Normalizing to one form and
+ * comparing against that fails whenever the two disagree — which is exactly
+ * how this broke: the URL-safe (stripped) form was reused for the claim check
+ * against a token whose `iss` ended in a slash.
+ *
+ * Accept both spellings rather than making correctness depend on how someone
+ * typed an env var.
+ */
+function acceptedIssuers(): [string, string] {
+  const bare = mcpIssuer().replace(/\/$/, "");
+  return [bare, `${bare}/`];
 }
 
 function jwks() {
@@ -37,7 +55,7 @@ function jwks() {
   // Authentik discovery is at `${issuer}/.well-known/openid-configuration`;
   // the JWKS URI is normally `${issuer}/jwks/` or `${issuer}/.well-known/jwks.json`.
   // Authentik canonically serves `${issuer}/jwks/`.
-  const url = new URL(`${mcpIssuer()}/jwks/`);
+  const url = new URL(`${mcpIssuer().replace(/\/$/, "")}/jwks/`);
   g.__sharedMemoryJwks = createRemoteJWKSet(url, {
     cacheMaxAge: 10 * 60 * 1000, // 10 min
     cooldownDuration: 30 * 1000,
@@ -126,7 +144,7 @@ export async function authenticateBearer(authHeader: string | null): Promise<Aut
     }
 
     const { payload } = await jwtVerify(token, jwks(), {
-      issuer: mcpIssuer(),
+      issuer: acceptedIssuers(),
       audience: env().OIDC_AUDIENCE,
     });
     if (!payload.sub) {
