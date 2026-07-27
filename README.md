@@ -144,6 +144,7 @@ Copy `.env.example` and fill in the values below.
 | `OIDC_CLIENT_SECRET_WEB` | both | Client secret of the Web-UI client. |
 | `OIDC_CLIENT_ID_MCP` | both | Client ID of the MCP resource-server client in your IdP. |
 | `OIDC_AUDIENCE` | both | Audience string the MCP access token must carry in its `aud` claim. Recommended: `shared-memory`. |
+| `OIDC_ISSUER_MCP` | optional | Issuer of MCP access tokens when the MCP endpoint is a separate IdP application (Authentik stamps each app's tokens with its own slug). Defaults to `OIDC_ISSUER`. |
 | `OIDC_AUDIENCE_SCOPE` | optional | Name of the IdP scope whose mapping emits that `aud` claim. Advertised in `scopes_supported` so clients request it. Defaults to `aud-<OIDC_AUDIENCE>`. |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | both | Local Postgres credentials. |
 | `NEXTAUTH_SECRET` | both | Session-cookie signing key. Generate with `openssl rand -base64 32`. |
@@ -320,6 +321,18 @@ reliable pattern:
 > ```bash
 > curl -s https://memory.example.com/.well-known/oauth-protected-resource \
 >   | jq .scopes_supported     # must include aud-<your audience>
+> ```
+>
+> **Second trap, same failure surface:** the MCP endpoint is a *separate
+> application* from the Web UI, and Authentik's default `per_provider` issuer
+> mode stamps each token with its own application slug. So MCP tokens carry
+> `iss: .../application/o/shared-memory-mcp/` while `OIDC_ISSUER` points at
+> `.../application/o/shared-memory/`, and verification fails with
+> `claim invalid: iss` even once `aud` is correct. Set `OIDC_ISSUER_MCP` to the
+> MCP application's issuer. Confirm which one your tokens actually carry:
+>
+> ```bash
+> curl -s https://auth.example.com/application/o/shared-memory-mcp/.well-known/openid-configuration | jq .issuer
 > ```
 >
 > Note also that Claude Code sends an RFC 8707 `resource` parameter on the

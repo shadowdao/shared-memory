@@ -13,6 +13,19 @@ const envSchema = z.object({
 
   // Authentik OIDC
   OIDC_ISSUER: z.string().url(),
+
+  // Issuer of MCP *access tokens*, when it differs from OIDC_ISSUER.
+  //
+  // The Web UI and the MCP endpoint are two separate applications in the IdP,
+  // and Authentik's default `per_provider` issuer mode stamps each token with
+  // its own application slug. So the web app issues
+  // `.../application/o/<slug>/` while the MCP provider issues
+  // `.../application/o/<slug>-mcp/`, and verifying MCP tokens against
+  // OIDC_ISSUER fails with "claim invalid: iss".
+  //
+  // Set this to the MCP application's issuer. Defaults to OIDC_ISSUER for
+  // single-application setups.
+  OIDC_ISSUER_MCP: z.string().url().optional(),
   OIDC_CLIENT_ID_WEB: z.string().min(1),
   OIDC_CLIENT_SECRET_WEB: z.string().min(1),
   OIDC_CLIENT_ID_MCP: z.string().min(1),
