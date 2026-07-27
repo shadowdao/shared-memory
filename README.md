@@ -322,9 +322,55 @@ prompt, never reaching the app.
 
 ## Connecting Claude Code
 
-Two paths, in order of preference:
+Three paths, in order of preference:
 
-### A. OAuth flow (recommended — picks up your IdP credentials)
+### A. Plugin (recommended — one command, no flags to remember)
+
+This repo doubles as a Claude Code plugin marketplace. `plugin/.mcp.json` ships a
+**pre-registered** OAuth client, so Claude Code never needs RFC 7591 Dynamic Client
+Registration — which matters because most self-hosted IdPs (Authentik included, as of
+2026.5) don't implement it.
+
+`main` carries placeholders, so install from `main` only after pointing it at your own
+instance. Fork or clone, then edit `plugin/.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "shared-memory": {
+      "type": "http",
+      "url": "https://memory.example.com/api/mcp",
+      "oauth": {
+        "clientId": "<OIDC_CLIENT_ID_MCP>",
+        "callbackPort": 33418
+      }
+    }
+  }
+}
+```
+
+`clientId` is the **Public** (PKCE) client from step B above — it is not a secret and is
+meant to be committed. `callbackPort` must match a redirect URI your IdP accepts; with
+the loopback regex from the setup step, any port works.
+
+Then:
+
+```bash
+claude plugin marketplace add https://your-git-host/you/shared-memory.git
+claude plugin install shared-memory@cybercove-labs
+```
+
+To keep a filled-in copy on a branch instead of forking, commit it to e.g.
+`instance/<name>` and install with a `#ref` fragment:
+
+```bash
+claude plugin marketplace add https://your-git-host/you/shared-memory.git#instance/<name>
+```
+
+The `#ref` suffix is undocumented in `claude plugin marketplace add --help` but is
+honored and persisted in `known_marketplaces.json` (verified on Claude Code 2.1.220).
+
+### B. OAuth flow (manual, per-machine)
 
 ```bash
 claude mcp add --transport http --scope user \
@@ -350,7 +396,7 @@ your MCP client's **Redirect URIs** list. Authentik users with the regex
 pattern from the setup step (`^http://(127\.0\.0\.1|localhost):\d+/.*$`)
 can use any port without re-registering.
 
-### B. Manual-paste fallback (when loopback isn't reachable)
+### C. Manual-paste fallback (when loopback isn't reachable)
 
 Sealed containers, devboxes without port forwarding, etc. The redirect URI
 in this case is hosted by *this* server:
@@ -372,7 +418,7 @@ Claude Code's prompt to complete the flow.
 The manual-fallback URI must be registered on your MCP client too:
 `https://memory.example.com/auth/cli-callback`.
 
-### C. Static bearer token (no browser at all)
+### D. Static bearer token (no browser at all)
 
 For fully headless / CI scenarios, mint a long-lived HMAC token at
 `https://memory.example.com/connect` and pass it via `--header`. See
