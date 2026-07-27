@@ -113,6 +113,10 @@ services:
       OIDC_CLIENT_SECRET_WEB: ${OIDC_CLIENT_SECRET_WEB:?required}
       OIDC_CLIENT_ID_MCP: ${OIDC_CLIENT_ID_MCP:?required}
       OIDC_AUDIENCE: ${OIDC_AUDIENCE:?required}
+      # Optional. This block is an explicit allow-list, not env_file — a var
+      # added to .env but not listed here never reaches the container.
+      OIDC_ISSUER_MCP: ${OIDC_ISSUER_MCP:-}
+      OIDC_AUDIENCE_SCOPE: ${OIDC_AUDIENCE_SCOPE:-}
 
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
 

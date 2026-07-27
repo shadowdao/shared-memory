@@ -4,6 +4,16 @@ const Bool = z
   .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
   .transform((v) => v === true || v === "true" || v === "1");
 
+/**
+ * Treat an empty string as "not set".
+ *
+ * docker-compose renders `${VAR:-}` as an empty string rather than omitting
+ * the key, so an unset optional var arrives as "" and would otherwise fail
+ * `.url()` / `.min(1)` validation and take the whole app down at boot.
+ */
+const optional = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess((v) => (v === "" ? undefined : v), schema.optional());
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
@@ -25,7 +35,7 @@ const envSchema = z.object({
   //
   // Set this to the MCP application's issuer. Defaults to OIDC_ISSUER for
   // single-application setups.
-  OIDC_ISSUER_MCP: z.string().url().optional(),
+  OIDC_ISSUER_MCP: optional(z.string().url()),
   OIDC_CLIENT_ID_WEB: z.string().min(1),
   OIDC_CLIENT_SECRET_WEB: z.string().min(1),
   OIDC_CLIENT_ID_MCP: z.string().min(1),
@@ -40,7 +50,7 @@ const envSchema = z.object({
   // every token arrives without an `aud` claim (-> 401 "claim invalid: aud").
   //
   // Defaults to the `aud-<audience>` convention used in the README setup.
-  OIDC_AUDIENCE_SCOPE: z.string().min(1).optional(),
+  OIDC_AUDIENCE_SCOPE: optional(z.string().min(1)),
 
   // Database
   DATABASE_URL: z.string().url(),
