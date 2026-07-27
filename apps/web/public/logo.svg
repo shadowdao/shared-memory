@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="shared-memory">
+  <title>shared-memory</title>
+  <!--
+    Transparent, currentColor variant of the mark for in-app use - inherits
+    the surrounding text color so it works on any surface. The tile version
+    used as the favicon lives at app/icon.svg.
+  -->
+  <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="7">
+    <path d="M13 15C25 15 27 32 37 32" opacity=".45"/>
+    <path d="M13 32H37"/>
+    <path d="M13 49C25 49 27 32 37 32" opacity=".7"/>
+  </g>
+  <circle cx="43" cy="32" r="8" fill="currentColor"/>
+</svg>
