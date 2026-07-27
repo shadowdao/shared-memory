@@ -63,7 +63,9 @@ export default async function SettingsPage() {
           </CardHeader>
           <CardBody className="text-sm text-fg-muted">
             OIDC group memberships from your IdP, refreshed at sign-in. Used
-            by the upcoming sharing feature to scope project visibility.
+            to scope project sharing &mdash; memories and snippets in a shared
+            project are readable by member groups and editable by read-write
+            groups.
           </CardBody>
         </Card>
       </div>
