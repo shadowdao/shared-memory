@@ -2,9 +2,9 @@
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "shared-memory",
   "version": "0.1.0",
-  "description": "Shared persistent memory and snippet library for Claude Code sessions, backed by memory.dnspegasus.net and authenticated with Authentik OIDC.",
+  "description": "Shared persistent memory and snippet library for Claude Code sessions, backed by your own shared-memory server and authenticated with OIDC.",
   "author": {
-    "name": "jknapp"
+    "name": "CyberCove Labs"
   },
-  "homepage": "https://memory.dnspegasus.net"
+  "homepage": "https://repo.anhonesthost.net/cybercove-labs/shared-memory"
 }

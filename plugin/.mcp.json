@@ -2,9 +2,9 @@
   "mcpServers": {
     "shared-memory": {
       "type": "http",
-      "url": "https://memory.dnspegasus.net/api/mcp",
+      "url": "https://memory.example.com/api/mcp",
       "oauth": {
-        "clientId": "5rkRS3rJhn3Ci9swWkxYMIrZ9OggsjOGy3cIOhYY",
+        "clientId": "<OIDC_CLIENT_ID_MCP>",
         "callbackPort": 33418
       }
     }
