@@ -23,13 +23,21 @@ type GlobalWithJwks = typeof globalThis & {
 };
 const g = globalThis as GlobalWithJwks;
 
+/**
+ * Issuer of MCP access tokens. The MCP endpoint is a separate application in
+ * the IdP from the Web UI, and Authentik stamps each token with its own
+ * application slug, so this is NOT interchangeable with OIDC_ISSUER.
+ */
+export function mcpIssuer(): string {
+  return (env().OIDC_ISSUER_MCP ?? env().OIDC_ISSUER).replace(/\/$/, "");
+}
+
 function jwks() {
   if (g.__sharedMemoryJwks) return g.__sharedMemoryJwks;
   // Authentik discovery is at `${issuer}/.well-known/openid-configuration`;
   // the JWKS URI is normally `${issuer}/jwks/` or `${issuer}/.well-known/jwks.json`.
   // Authentik canonically serves `${issuer}/jwks/`.
-  const issuer = env().OIDC_ISSUER.replace(/\/$/, "");
-  const url = new URL(`${issuer}/jwks/`);
+  const url = new URL(`${mcpIssuer()}/jwks/`);
   g.__sharedMemoryJwks = createRemoteJWKSet(url, {
     cacheMaxAge: 10 * 60 * 1000, // 10 min
     cooldownDuration: 30 * 1000,
@@ -118,7 +126,7 @@ export async function authenticateBearer(authHeader: string | null): Promise<Aut
     }
 
     const { payload } = await jwtVerify(token, jwks(), {
-      issuer: env().OIDC_ISSUER,
+      issuer: mcpIssuer(),
       audience: env().OIDC_AUDIENCE,
     });
     if (!payload.sub) {

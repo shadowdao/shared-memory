@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { env } from "@/lib/env";
+import { mcpIssuer } from "@/lib/auth/jwt";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,7 +23,10 @@ export function GET() {
 
   return NextResponse.json({
     resource,
-    authorization_servers: [env().OIDC_ISSUER],
+    // The MCP application's issuer, which is not necessarily the Web UI's —
+    // see mcpIssuer(). Advertising the wrong one sends clients to a discovery
+    // document whose tokens this endpoint will then reject on `iss`.
+    authorization_servers: [mcpIssuer()],
     scopes_supported: ["openid", "profile", "email", audienceScope],
     bearer_methods_supported: ["header"],
     resource_documentation: `${resource}/`,
