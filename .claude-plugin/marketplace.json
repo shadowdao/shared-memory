@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "triple-c",
+  "description": "shared-memory plugin for the triple-c container (OAuth callback on the mapped port 5693).",
+  "owner": {
+    "name": "jknapp",
+    "url": "https://repo.anhonesthost.net/jknapp/shared-memory"
+  },
+  "plugins": [
+    {
+      "name": "shared-memory",
+      "source": "./plugin",
+      "description": "Shared persistent memory and snippet library for Claude Code sessions, backed by memory.dnspegasus.net and authenticated with Authentik OIDC."
+    }
+  ]
+}

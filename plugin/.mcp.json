@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "shared-memory": {
+      "type": "http",
+      "url": "https://memory.dnspegasus.net/api/mcp",
+      "oauth": {
+        "clientId": "5rkRS3rJhn3Ci9swWkxYMIrZ9OggsjOGy3cIOhYY",
+        "callbackPort": 5693
+      }
+    }
+  }
+}
