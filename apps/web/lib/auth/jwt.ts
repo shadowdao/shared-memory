@@ -135,7 +135,24 @@ export async function authenticateBearer(authHeader: string | null): Promise<Aut
         buildWwwAuthenticate("invalid_token", "missing sub"),
       );
     }
-    return { ...payload, groups: extractGroupsClaim(payload) } as AuthenticatedClaims;
+    // Normalize the issuer for identity purposes.
+    //
+    // The token was just verified against mcpIssuer() — that check is done.
+    // But identity is keyed on (oidc_iss, oidc_sub), and the Web UI signs
+    // people in through a DIFFERENT application whose tokens carry
+    // OIDC_ISSUER. Authentik's `sub` is stable across providers (it is
+    // `user.uid`, a user-level value), so the only thing that differs is the
+    // issuer.
+    //
+    // Leave it un-normalized and userContextFromClaims — which UPSERTS rather
+    // than failing — quietly creates a SECOND user row for the same human:
+    // MCP writes would land in an account with none of their memories, and
+    // nothing would look broken. Pin identity to the canonical issuer.
+    return {
+      ...payload,
+      iss: env().OIDC_ISSUER,
+      groups: extractGroupsClaim(payload),
+    } as AuthenticatedClaims;
   } catch (err) {
     if (err instanceof UnauthorizedError) throw err;
     const desc =
