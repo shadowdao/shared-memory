@@ -335,6 +335,13 @@ reliable pattern:
 > curl -s https://auth.example.com/application/o/shared-memory-mcp/.well-known/openid-configuration | jq .issuer
 > ```
 >
+> **Identity note:** the app verifies MCP tokens against `OIDC_ISSUER_MCP` but
+> keys the user record on `OIDC_ISSUER`. Authentik's `sub` is `user.uid`, which
+> is stable across providers, so the same person resolves to the same row
+> whether they arrive via the Web UI or the MCP endpoint. Without that
+> normalization the MCP path silently creates a second, empty account instead
+> of failing visibly.
+>
 > Note also that Claude Code sends an RFC 8707 `resource` parameter on the
 > authorize request; Authentik 2026.5 ignores it, so it cannot be relied on
 > for audience binding. The scope mapping is what sets `aud`.
