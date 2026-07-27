@@ -67,6 +67,13 @@ const envSchema = z.object({
   // every issued CLI token at once.
   CLI_TOKEN_SECRET: z.string().min(32, "CLI_TOKEN_SECRET must be at least 32 chars"),
 
+  // Plugin marketplace this instance is published from. When set, the CLI
+  // tokens page shows the one-command plugin install, so people only mint a
+  // bearer token when their machine genuinely can't complete a browser
+  // sign-in. Left unset, that hint is hidden rather than shown wrong.
+  PLUGIN_MARKETPLACE_URL: optional(z.string().url()),
+  PLUGIN_MARKETPLACE_NAME: z.string().min(1).default("shared-memory"),
+
   // Behavior flags
   ALLOW_INSECURE_HTTP: Bool.optional().default(false),
 });
@@ -110,6 +117,7 @@ function buildPhaseStub(): Env {
     EMBEDDING_DIM: 384,
     NEXTAUTH_SECRET: "build-phase-secret-not-used-at-runtime-xxxxxxxx",
     CLI_TOKEN_SECRET: "build-phase-secret-not-used-at-runtime-xxxxxxxx",
+    PLUGIN_MARKETPLACE_NAME: "shared-memory",
     ALLOW_INSECURE_HTTP: false,
   };
 }

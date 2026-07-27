@@ -145,6 +145,8 @@ Copy `.env.example` and fill in the values below.
 | `OIDC_CLIENT_ID_MCP` | both | Client ID of the MCP resource-server client in your IdP. |
 | `OIDC_AUDIENCE` | both | Audience string the MCP access token must carry in its `aud` claim. Recommended: `shared-memory`. |
 | `OIDC_ISSUER_MCP` | optional | Issuer of MCP access tokens when the MCP endpoint is a separate IdP application (Authentik stamps each app's tokens with its own slug). Defaults to `OIDC_ISSUER`. |
+| `PLUGIN_MARKETPLACE_URL` | optional | Marketplace URL for this instance's plugin. Shown as a one-command install on the CLI tokens page. Hidden when unset. |
+| `PLUGIN_MARKETPLACE_NAME` | optional | Marketplace name used in `shared-memory@<name>`. Defaults to `shared-memory`. |
 | `OIDC_AUDIENCE_SCOPE` | optional | Name of the IdP scope whose mapping emits that `aud` claim. Advertised in `scopes_supported` so clients request it. Defaults to `aud-<OIDC_AUDIENCE>`. |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | both | Local Postgres credentials. |
 | `NEXTAUTH_SECRET` | both | Session-cookie signing key. Generate with `openssl rand -base64 32`. |

@@ -108,6 +108,44 @@ async function revokeTokenAction(formData: FormData) {
   revalidatePath("/settings/tokens");
 }
 
+/**
+ * Points people at the plugin before they mint a token they don't need.
+ *
+ * Rendered only when this instance knows which marketplace it's published
+ * from — showing a copyable command that points nowhere is worse than showing
+ * nothing.
+ */
+function PluginHint({
+  marketplaceUrl,
+  marketplaceName,
+}: {
+  marketplaceUrl: string | undefined;
+  marketplaceName: string;
+}) {
+  if (!marketplaceUrl) return null;
+  return (
+    <Card className="mb-6">
+      <CardHeader className="text-sm font-medium text-fg">
+        If this machine has a browser, install the plugin instead
+      </CardHeader>
+      <CardBody>
+        <p className="text-sm text-fg-muted mb-3">
+          The plugin signs you in through {" "}
+          <span className="text-fg">your usual login</span>, so there&apos;s no
+          token to copy, store, or rotate. Generate a token below only when a
+          browser sign-in isn&apos;t possible.
+        </p>
+        <pre className="text-xs !whitespace-pre-wrap !break-all select-all">
+          {[
+            `claude plugin marketplace add ${marketplaceUrl}`,
+            `claude plugin install shared-memory@${marketplaceName}`,
+          ].join("\n")}
+        </pre>
+      </CardBody>
+    </Card>
+  );
+}
+
 export default async function TokensPage() {
   const session = await auth();
   const userId = session!.user.id;
@@ -144,7 +182,12 @@ export default async function TokensPage() {
     <Container className="pt-6 max-w-3xl">
       <PageHeader
         title="CLI tokens"
-        description={`Long-lived bearer tokens for MCP clients without browser access. ${ttlDays}-day expiry per token.`}
+        description={`For machines that can't complete a browser sign-in — headless containers, CI runners, sealed devboxes. Tokens last ${ttlDays} days and can be revoked one at a time.`}
+      />
+
+      <PluginHint
+        marketplaceUrl={env().PLUGIN_MARKETPLACE_URL}
+        marketplaceName={env().PLUGIN_MARKETPLACE_NAME}
       />
 
       <Card className="mb-6">
