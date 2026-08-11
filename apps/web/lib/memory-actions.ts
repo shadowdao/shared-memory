@@ -2,43 +2,88 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { auth } from "@/auth";
 import { db } from "@/lib/db/client";
-import { memories, projects, auditLog } from "@/lib/db/schema";
-import { embedText } from "@/lib/embedder";
+import { projects } from "@/lib/db/schema";
 import { resolveProjectId, upsertProject } from "@/lib/projects";
 import {
   MemoryWriteInput,
   MemoryUpdateInput,
   MemoryDeleteInput,
 } from "@shared-memory/schemas";
+import { getUserGroupNames, readableProjectIds } from "@/lib/access";
 import {
-  CONCURRENT_EDIT_ERROR,
-  canWriteProject,
-  getUserGroupNames,
-  readableProjectIds,
-} from "@/lib/access";
+  createMemory,
+  softDeleteMemory,
+  updateMemory,
+  type Actor,
+  type Outcome,
+  type ProjectResolver,
+} from "@/lib/memory-mutations";
 
 /**
- * Server Actions for memory CRUD from the Web UI. Mirrors the MCP tools
- * but writes through the same DB layer, so updates and deletes here are
- * indistinguishable from those made via Claude Code.
+ * Server Actions for memory CRUD from the Web UI.
+ *
+ * These are thin adapters: form parsing, then `lib/memory-mutations`,
+ * then revalidate/redirect. The authorize → mutate → re-embed → CAS →
+ * audit sequence lives in that shared module so this surface and the MCP
+ * tools cannot drift apart — they previously did, and the sharing rules
+ * ended up subtly different between them.
  *
  * `actor` is "web" in audit_log so we can tell the two paths apart later.
- *
- * Sharing: project-scope memories may live under projects shared with
- * the user's groups. Reads include those projects; writes require the
- * user to own the project or have an `rw` share. Cross-user concurrent
- * edits use the `version` column for optimistic locking — if the stored
- * version no longer matches what the form submitted, we surface
- * `CONCURRENT_EDIT_ERROR` rather than clobber.
  */
 
 async function requireUserId(): Promise<string> {
   const session = await auth();
   if (!session?.user?.id) throw new Error("not authenticated");
   return session.user.id;
+}
+
+/** Server Actions signal failure by throwing; the shared layer returns Outcome. */
+function must<T>(outcome: Outcome<T>): T {
+  if (!outcome.ok) throw new Error(outcome.error);
+  return outcome.value;
+}
+
+async function webActor(): Promise<{ actor: Actor; resolveProject: ProjectResolver }> {
+  const userId = await requireUserId();
+  const groups = await getUserGroupNames(userId);
+  return {
+    actor: { userId, groups, via: "web" },
+    resolveProject: webProjectResolver(userId, groups),
+  };
+}
+
+/**
+ * Project resolution for Web UI writes. Unlike the MCP surface, an
+ * unknown key is CREATED rather than rejected — a person typing a project
+ * name into a form means to make one. Shared projects are matched only
+ * within the set the user can actually read, because `projects.key` is
+ * unique per user rather than globally: an unscoped key match could
+ * otherwise select someone else's project.
+ *
+ * Write access to whatever this returns is enforced centrally by the
+ * mutation layer, so it deliberately isn't re-checked here.
+ */
+function webProjectResolver(userId: string, groupNames: string[]): ProjectResolver {
+  return async (key: string) => {
+    const owned = await resolveProjectId(userId, key);
+    if (owned) return { ok: true, value: owned };
+
+    const readableIds = await readableProjectIds(userId, groupNames);
+    const shared =
+      readableIds.length > 0
+        ? await db
+            .select({ id: projects.id })
+            .from(projects)
+            .where(and(eq(projects.key, key), inArray(projects.id, readableIds)))
+            .limit(1)
+        : [];
+    if (shared[0]) return { ok: true, value: shared[0].id };
+
+    return { ok: true, value: await upsertProject(userId, key) };
+  };
 }
 
 function parseTags(raw: FormDataEntryValue | null): string[] {
@@ -50,95 +95,26 @@ function parseTags(raw: FormDataEntryValue | null): string[] {
 }
 
 export async function createMemoryAction(formData: FormData) {
-  const userId = await requireUserId();
-  const groupNames = await getUserGroupNames(userId);
+  const { actor, resolveProject } = await webActor();
 
-  const payload = {
+  const parsed = MemoryWriteInput.safeParse({
     content: String(formData.get("content") ?? "").trim(),
     scope: (formData.get("scope") as "project" | "user") || "project",
     project: (formData.get("project") as string | null)?.trim() || undefined,
     tags: parseTags(formData.get("tags")),
-  };
-  const parsed = MemoryWriteInput.safeParse(payload);
+  });
   if (!parsed.success) {
     throw new Error(parsed.error.issues.map((i) => i.message).join("; "));
   }
 
-  let projectId: string | null = null;
-  if (parsed.data.scope === "project") {
-    if (!parsed.data.project) throw new Error("scope=project requires `project`");
-    // Same priority as memory.update's reclassification path: prefer an
-    // owned project; otherwise check for a shared one we have rw on;
-    // otherwise auto-upsert as owner.
-    const owned = await resolveProjectId(userId, parsed.data.project);
-    if (owned) {
-      projectId = owned;
-    } else {
-      // Restrict the by-key lookup to projects the user can actually
-      // read. Without this, a different user's project with the same
-      // key string could be selected (`projects.key` is unique per user,
-      // not globally), opening a cross-user write hazard.
-      const readableIds = await readableProjectIds(userId, groupNames);
-      const sharedRow =
-        readableIds.length > 0
-          ? await db
-              .select({ id: projects.id })
-              .from(projects)
-              .where(
-                and(
-                  eq(projects.key, parsed.data.project),
-                  inArray(projects.id, readableIds),
-                ),
-              )
-              .limit(1)
-          : [];
-      if (sharedRow[0]) {
-        const allowed = await canWriteProject(userId, groupNames, sharedRow[0].id);
-        if (!allowed) {
-          throw new Error(`no write access to project '${parsed.data.project}'`);
-        }
-        projectId = sharedRow[0].id;
-      } else {
-        projectId = await upsertProject(userId, parsed.data.project);
-      }
-    }
-  }
-
-  const embedding = await embedText(parsed.data.content);
-
-  const inserted = await db
-    .insert(memories)
-    .values({
-      userId,
-      projectId,
-      scope: parsed.data.scope,
-      content: parsed.data.content,
-      tags: parsed.data.tags ?? [],
-      embedding,
-      lastEditedBy: userId,
-    })
-    .returning({ id: memories.id });
-
-  await db.insert(auditLog).values({
-    userId,
-    actor: "web",
-    action: "memory.write",
-    entityType: "memory",
-    entityId: inserted[0]!.id,
-    payload: {
-      scope: parsed.data.scope,
-      projectKey: parsed.data.project ?? null,
-      tags: parsed.data.tags ?? [],
-    },
-  });
+  const created = must(await createMemory(actor, parsed.data, resolveProject));
 
   revalidatePath("/memories");
-  redirect(`/memories/${inserted[0]!.id}`);
+  redirect(`/memories/${created.id}`);
 }
 
 export async function updateMemoryAction(formData: FormData) {
-  const userId = await requireUserId();
-  const groupNames = await getUserGroupNames(userId);
+  const { actor, resolveProject } = await webActor();
 
   const id = String(formData.get("id") ?? "");
   const rawScope = formData.get("scope");
@@ -164,153 +140,7 @@ export async function updateMemoryAction(formData: FormData) {
     throw new Error(parsed.error.issues.map((i) => i.message).join("; "));
   }
 
-  // Fetch the row regardless of ownership — we may be editing a shared
-  // memory. Authorization is enforced below against the project, not
-  // by `user_id`.
-  const existingRows = await db
-    .select({
-      id: memories.id,
-      content: memories.content,
-      scope: memories.scope,
-      projectId: memories.projectId,
-      projectKey: projects.key,
-      version: memories.version,
-      userId: memories.userId,
-    })
-    .from(memories)
-    .leftJoin(projects, eq(memories.projectId, projects.id))
-    .where(and(eq(memories.id, parsed.data.id), isNull(memories.deletedAt)))
-    .limit(1);
-  const existing = existingRows[0];
-  if (!existing) throw new Error("not found");
-
-  // Authorize write. For user-scope memories, only the owner can edit.
-  // For project-scope memories, owner OR a group with rw access.
-  if (existing.scope === "user") {
-    if (existing.userId !== userId) throw new Error("not found");
-  } else if (existing.projectId) {
-    const allowed = await canWriteProject(userId, groupNames, existing.projectId);
-    if (!allowed) {
-      throw new Error("you don't have write access to this project");
-    }
-  }
-
-  const update: Record<string, unknown> = {
-    updatedAt: new Date(),
-    lastEditedBy: userId,
-    version: existing.version + 1,
-  };
-  if (parsed.data.tags !== undefined) update.tags = parsed.data.tags;
-  if (parsed.data.content !== undefined && parsed.data.content !== existing.content) {
-    update.content = parsed.data.content;
-    update.embedding = await embedText(parsed.data.content);
-  }
-
-  let scopeChanged = false;
-  let projectChanged = false;
-  let newProjectKey: string | null = existing.projectKey ?? null;
-
-  if (parsed.data.scope !== undefined) {
-    if (parsed.data.scope === "user") {
-      if (existing.scope !== "user") {
-        update.scope = "user";
-        scopeChanged = true;
-      }
-      if (existing.projectId !== null) {
-        update.projectId = null;
-        projectChanged = true;
-        newProjectKey = null;
-      }
-    } else {
-      // scope === 'project' — schema refine guarantees project is set.
-      // Moving INTO a project requires write access there. Owners get
-      // a fresh project upsert; non-owners must target an existing one
-      // they have rw on.
-      const projectKey = parsed.data.project!;
-      let projectId: string;
-      const existingId = await resolveProjectId(userId, projectKey);
-      if (existingId) {
-        projectId = existingId;
-      } else {
-        // Restrict the shared-project lookup to projects the user can
-        // actually read (`projects.key` is unique per user, not globally,
-        // so an unscoped key match could resolve another user's project).
-        const readableIds = await readableProjectIds(userId, groupNames);
-        const sharedRow =
-          readableIds.length > 0
-            ? await db
-                .select({ id: projects.id })
-                .from(projects)
-                .where(
-                  and(eq(projects.key, projectKey), inArray(projects.id, readableIds)),
-                )
-                .limit(1)
-            : [];
-        if (sharedRow[0]) {
-          const allowed = await canWriteProject(userId, groupNames, sharedRow[0].id);
-          if (!allowed) {
-            throw new Error(`no write access to project '${projectKey}'`);
-          }
-          projectId = sharedRow[0].id;
-        } else {
-          // Auto-upsert as owner — user becomes the project owner of a
-          // brand-new private project.
-          projectId = await upsertProject(userId, projectKey);
-        }
-      }
-      if (existing.scope !== "project") {
-        update.scope = "project";
-        scopeChanged = true;
-      }
-      if (existing.projectId !== projectId) {
-        update.projectId = projectId;
-        projectChanged = true;
-        newProjectKey = projectKey;
-      }
-    }
-  }
-
-  // Optimistic-locking guard. When `version` is supplied, the UPDATE
-  // matches on (id, version); a 0-row result means the caller's view
-  // is stale. When `version` is NOT supplied, we still match on the
-  // pre-fetched version to keep behaviour deterministic.
-  const expectedVersion = parsed.data.version ?? existing.version;
-  const updated = await db
-    .update(memories)
-    .set(update)
-    .where(
-      and(
-        eq(memories.id, parsed.data.id),
-        eq(memories.version, expectedVersion),
-      ),
-    )
-    .returning({ id: memories.id });
-
-  if (!updated[0]) throw new Error(CONCURRENT_EDIT_ERROR);
-
-  const auditFields = Object.keys(update).filter(
-    (k) => k !== "updatedAt" && k !== "version" && k !== "lastEditedBy",
-  );
-  const auditPayload: Record<string, unknown> = { fields: auditFields };
-  if (scopeChanged || projectChanged) {
-    auditPayload.scope = {
-      from: existing.scope,
-      to: update.scope ?? existing.scope,
-    };
-    auditPayload.projectKey = {
-      from: existing.projectKey ?? null,
-      to: newProjectKey,
-    };
-  }
-
-  await db.insert(auditLog).values({
-    userId,
-    actor: "web",
-    action: "memory.update",
-    entityType: "memory",
-    entityId: parsed.data.id,
-    payload: auditPayload,
-  });
+  must(await updateMemory(actor, parsed.data, resolveProject));
 
   revalidatePath(`/memories/${parsed.data.id}`);
   revalidatePath("/memories");
@@ -318,8 +148,7 @@ export async function updateMemoryAction(formData: FormData) {
 }
 
 export async function deleteMemoryAction(formData: FormData) {
-  const userId = await requireUserId();
-  const groupNames = await getUserGroupNames(userId);
+  const { actor } = await webActor();
   const id = String(formData.get("id") ?? "");
   const rawVersion = formData.get("version");
   const version =
@@ -332,53 +161,7 @@ export async function deleteMemoryAction(formData: FormData) {
   });
   if (!parsed.success) throw new Error(parsed.error.issues[0]!.message);
 
-  // Authorize delete: same rule as update — owner OR rw on the project.
-  const existing = await db
-    .select({
-      id: memories.id,
-      scope: memories.scope,
-      projectId: memories.projectId,
-      userId: memories.userId,
-      version: memories.version,
-    })
-    .from(memories)
-    .where(and(eq(memories.id, parsed.data.id), isNull(memories.deletedAt)))
-    .limit(1);
-  const row = existing[0];
-  if (!row) throw new Error("not found");
-
-  if (row.scope === "user") {
-    if (row.userId !== userId) throw new Error("not found");
-  } else if (row.projectId) {
-    const allowed = await canWriteProject(userId, groupNames, row.projectId);
-    if (!allowed) throw new Error("you don't have write access to this project");
-  }
-
-  // CAS on version so a peer's concurrent edit can't be silently overwritten
-  // by this delete. Form may or may not supply version; fall back to the row
-  // we just read to keep behaviour deterministic.
-  const expectedVersion = parsed.data.version ?? row.version;
-  const updated = await db
-    .update(memories)
-    .set({ deletedAt: new Date(), lastEditedBy: userId })
-    .where(
-      and(
-        eq(memories.id, parsed.data.id),
-        eq(memories.version, expectedVersion),
-        isNull(memories.deletedAt),
-      ),
-    )
-    .returning({ id: memories.id });
-
-  if (!updated[0]) throw new Error(CONCURRENT_EDIT_ERROR);
-
-  await db.insert(auditLog).values({
-    userId,
-    actor: "web",
-    action: "memory.delete",
-    entityType: "memory",
-    entityId: updated[0].id,
-  });
+  must(await softDeleteMemory(actor, parsed.data));
 
   revalidatePath("/memories");
   redirect("/memories");

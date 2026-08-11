@@ -6,7 +6,7 @@ import { db, pg } from "@/lib/db/client";
 import { projects, users } from "@/lib/db/schema";
 import { getProjectAccess, getUserGroupNames, readableProjectIds } from "@/lib/access";
 import { Container, PageHeader } from "@/app/_components/ui/container";
-import { Card, CardBody } from "@/app/_components/ui/card";
+import { Card } from "@/app/_components/ui/card";
 import { Badge } from "@/app/_components/ui/badge";
 import { Button } from "@/app/_components/ui/button";
 import { EmptyState } from "@/app/_components/ui/empty-state";

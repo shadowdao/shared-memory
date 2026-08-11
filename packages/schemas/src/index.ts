@@ -18,7 +18,8 @@ export const ProjectKey = z
   .regex(/^[a-zA-Z0-9._\-/]+$/, "project key may only contain alphanumerics, ._-/");
 export type ProjectKey = z.infer<typeof ProjectKey>;
 
-export const MemoryContent = z.string().min(1).max(64_000);
+export const MEMORY_CONTENT_MAX = 64_000;
+export const MemoryContent = z.string().min(1).max(MEMORY_CONTENT_MAX);
 
 export const Tags = z
   .array(z.string().min(1).max(64).regex(/^[a-zA-Z0-9._\-]+$/, "tag must be alphanumeric ._-"))
@@ -83,6 +84,19 @@ export const MemoryUpdateInput = z.object({
     message: "scope='user' cannot have a project key",
   });
 export type MemoryUpdateInput = z.infer<typeof MemoryUpdateInput>;
+
+// memory.patch replaces ONE exact occurrence of `old_string`. Absent or
+// ambiguous matches are errors, never silent no-ops — see applyPatch.
+// `new_string` may be empty (a deletion); the resulting content still has
+// to satisfy MemoryContent, which is checked after the patch is applied.
+export const MemoryPatchInput = z.object({
+  id: z.string().uuid(),
+  old_string: z.string().min(1).max(MEMORY_CONTENT_MAX),
+  new_string: z.string().max(MEMORY_CONTENT_MAX),
+  // Same optimistic-locking token as memory.update.
+  version: z.number().int().nonnegative().optional(),
+});
+export type MemoryPatchInput = z.infer<typeof MemoryPatchInput>;
 
 export const MemorySearchInput = z.object({
   query: z.string().min(1).max(2000),
