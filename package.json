@@ -12,6 +12,7 @@
     "build": "pnpm -r build",
     "dev": "pnpm --filter @shared-memory/web dev",
     "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "db:generate": "pnpm --filter @shared-memory/web db:generate",
     "db:migrate": "pnpm --filter @shared-memory/web db:migrate"

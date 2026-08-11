@@ -1,5 +1,5 @@
 import { revalidatePath } from "next/cache";
-import { and, asc, desc, eq, isNull } from "drizzle-orm";
+import { and, asc, desc, eq } from "drizzle-orm";
 import { auth } from "@/auth";
 import { env } from "@/lib/env";
 import { db } from "@/lib/db/client";

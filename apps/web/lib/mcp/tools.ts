@@ -11,6 +11,7 @@ import {
   MemoryIdInput,
   MemoryDeleteInput,
   MemoryListInput,
+  MemoryPatchInput,
   MemorySearchInput,
   MemoryUpdateInput,
   MemoryWriteInput,
@@ -20,20 +21,22 @@ import {
   SnippetListInput,
   SnippetDeleteInput,
 } from "@shared-memory/schemas";
-import { embedText } from "@/lib/embedder";
 import { searchMemories } from "@/lib/memories";
+import {
+  createMemory,
+  patchMemory,
+  softDeleteMemory,
+  updateMemory,
+  type Actor,
+  type ProjectResolver,
+} from "@/lib/memory-mutations";
 import {
   getSnippet,
   putSnippet,
   listSnippets,
   softDeleteSnippet,
 } from "@/lib/snippets";
-import {
-  CONCURRENT_EDIT_ERROR,
-  canWriteProject,
-  getProjectAccess,
-  readableProjectIds,
-} from "@/lib/access";
+import { getProjectAccess, readableProjectIds } from "@/lib/access";
 import type { UserContext } from "./context";
 
 /**
@@ -149,6 +152,27 @@ function withDefaultProject(
   if (obj.scope === "user") return args;
   if (obj.scope === undefined && defaultScope === "user") return args;
   return { ...obj, project: ctx.defaultProjectKey };
+}
+
+/** Adapt an MCP request context to the shared mutation layer. */
+function mcpActor(ctx: UserContext): Actor {
+  return { userId: ctx.userId, groups: ctx.groups, via: "mcp" };
+}
+
+/**
+ * Project resolution for MCP writes. Unlike the Web UI, the MCP surface
+ * never auto-creates a project — an unknown key is an error telling the
+ * caller to run project.identify first, which keeps agents from silently
+ * spawning near-miss projects off a typo'd key.
+ */
+function mcpProjectResolver(ctx: UserContext): ProjectResolver {
+  return async (key: string) => {
+    const id = await resolveProjectId(ctx, key);
+    if (!id) {
+      return { ok: false, error: `unknown project '${key}'; call project.identify first` };
+    }
+    return { ok: true, value: id };
+  };
 }
 
 // ---------- tools ----------
@@ -373,55 +397,18 @@ const memoryWrite: ToolDef = {
     const parsed = MemoryWriteInput.safeParse(withDefaultProject(args, ctx));
     if (!parsed.success) return err(parsed.error.message);
 
-    const scope = parsed.data.scope;
-    let projectId: string | null = null;
-    let projectKey: string | undefined = undefined;
-    if (scope === "project") {
-      projectKey = projectKeyOrDefault(ctx, parsed.data.project);
-      if (!projectKey) {
-        return err("scope=project requires `project` key (or X-Project-Key header)");
-      }
-      projectId = await resolveProjectId(ctx, projectKey);
-      if (!projectId) {
-        return err(`unknown project '${projectKey}'; call project.identify first`);
-      }
-      // Authorize write. Owner always allowed; otherwise require rw.
-      const allowed = await canWriteProject(ctx.userId, ctx.groups, projectId);
-      if (!allowed) {
-        return err(`no write access to project '${projectKey}'`);
-      }
+    // Fold the X-Project-Key fallback in before the shared path sees it.
+    const input = {
+      ...parsed.data,
+      project: projectKeyOrDefault(ctx, parsed.data.project),
+    };
+    if (input.scope === "project" && !input.project) {
+      return err("scope=project requires `project` key (or X-Project-Key header)");
     }
 
-    // Embed inline so the new memory is searchable immediately. Slower
-    // writes (~50–150 ms) are an acceptable price for that guarantee; if
-    // embedder pressure ever forces an async path, only this section
-    // needs to change.
-    const embedding = await embedText(parsed.data.content);
-
-    const inserted = await db
-      .insert(memories)
-      .values({
-        userId: ctx.userId,
-        projectId,
-        scope,
-        content: parsed.data.content,
-        tags: parsed.data.tags ?? [],
-        embedding,
-        lastEditedBy: ctx.userId,
-      })
-      .returning({ id: memories.id, createdAt: memories.createdAt });
-
-    const m = inserted[0]!;
-    await db.insert(auditLog).values({
-      userId: ctx.userId,
-      actor: "mcp",
-      action: "memory.write",
-      entityType: "memory",
-      entityId: m.id,
-      payload: { scope, projectKey: projectKey ?? null, tags: parsed.data.tags ?? [] },
-    });
-
-    return ok({ id: m.id, createdAt: m.createdAt }, `wrote memory ${m.id}`);
+    const res = await createMemory(mcpActor(ctx), input, mcpProjectResolver(ctx));
+    if (!res.ok) return err(res.error);
+    return ok(res.value, `wrote memory ${res.value.id}`);
   },
 };
 
@@ -508,8 +495,28 @@ const memoryGet: ToolDef = {
     const parsed = MemoryIdInput.safeParse(args);
     if (!parsed.success) return err(parsed.error.message);
 
+    // Project explicitly rather than `select()`-ing the raw row. The
+    // table carries `embedding` (384 floats) and `content_tsv` (the full
+    // lexeme index, which outgrows `content` itself on large memories) —
+    // both are Postgres retrieval internals that no MCP client can use,
+    // and together they were the majority of every response. Returning
+    // them also pushed large memories past the tool-output cap. This is
+    // the same 9-field shape memory.list and memory.search return.
     const row = await db
-      .select()
+      .select({
+        id: memories.id,
+        scope: memories.scope,
+        projectId: memories.projectId,
+        content: memories.content,
+        tags: memories.tags,
+        version: memories.version,
+        lastEditedBy: memories.lastEditedBy,
+        createdAt: memories.createdAt,
+        updatedAt: memories.updatedAt,
+        // Needed for the authorization check below; stripped before the
+        // response so the payload matches list/search exactly.
+        userId: memories.userId,
+      })
       .from(memories)
       .where(and(eq(memories.id, parsed.data.id), isNull(memories.deletedAt)))
       .limit(1);
@@ -518,8 +525,8 @@ const memoryGet: ToolDef = {
 
     // Authorize read: own row, OR project-scope row in an accessible
     // project. Anything else looks "not found" to the caller.
-    const m = row[0];
-    if (m.userId !== ctx.userId) {
+    const { userId, ...m } = row[0];
+    if (userId !== ctx.userId) {
       if (!m.projectId) return err("not found");
       const access = await getProjectAccess(ctx.userId, ctx.groups, m.projectId);
       if (access === null) return err("not found");
@@ -550,57 +557,9 @@ const memoryDelete: ToolDef = {
     const parsed = MemoryDeleteInput.safeParse(args);
     if (!parsed.success) return err(parsed.error.message);
 
-    // Look up the row first to authorize and capture its current version
-    // for the CAS. Shared-project writes need a per-project access check.
-    const target = await db
-      .select({
-        id: memories.id,
-        userId: memories.userId,
-        projectId: memories.projectId,
-        scope: memories.scope,
-        version: memories.version,
-      })
-      .from(memories)
-      .where(and(eq(memories.id, parsed.data.id), isNull(memories.deletedAt)))
-      .limit(1);
-    const m = target[0];
-    if (!m) return err("not found");
-
-    if (m.userId !== ctx.userId) {
-      // Not the owner. User-scope memories can only be deleted by their
-      // owner; project-scope require rw access on the project.
-      if (m.scope === "user" || !m.projectId) return err("not found");
-      const allowed = await canWriteProject(ctx.userId, ctx.groups, m.projectId);
-      if (!allowed) return err("no write access to this project");
-    }
-
-    // Optimistic-lock CAS: pin to the caller-supplied version when given,
-    // else the version we just read in this handler. The 0-row response
-    // tells us a peer raced us.
-    const expectedVersion = parsed.data.version ?? m.version;
-    const updated = await db
-      .update(memories)
-      .set({ deletedAt: new Date(), lastEditedBy: ctx.userId })
-      .where(
-        and(
-          eq(memories.id, parsed.data.id),
-          eq(memories.version, expectedVersion),
-          isNull(memories.deletedAt),
-        ),
-      )
-      .returning({ id: memories.id });
-
-    if (!updated[0]) return err(CONCURRENT_EDIT_ERROR);
-
-    await db.insert(auditLog).values({
-      userId: ctx.userId,
-      actor: "mcp",
-      action: "memory.delete",
-      entityType: "memory",
-      entityId: updated[0].id,
-    });
-
-    return ok({ id: updated[0].id, deleted: true }, `deleted memory ${updated[0].id}`);
+    const res = await softDeleteMemory(mcpActor(ctx), parsed.data);
+    if (!res.ok) return err(res.error);
+    return ok({ id: res.value.id, deleted: true }, `deleted memory ${res.value.id}`);
   },
 };
 
@@ -638,124 +597,51 @@ const memoryUpdate: ToolDef = {
     const parsed = MemoryUpdateInput.safeParse(withDefaultProject(args, ctx));
     if (!parsed.success) return err(parsed.error.message);
 
-    const existingRows = await db
-      .select({
-        id: memories.id,
-        content: memories.content,
-        scope: memories.scope,
-        projectId: memories.projectId,
-        projectKey: projects.key,
-        version: memories.version,
-        userId: memories.userId,
-      })
-      .from(memories)
-      .leftJoin(projects, eq(memories.projectId, projects.id))
-      .where(and(eq(memories.id, parsed.data.id), isNull(memories.deletedAt)))
-      .limit(1);
-    const existing = existingRows[0];
-    if (!existing) return err("not found");
+    const res = await updateMemory(mcpActor(ctx), parsed.data, mcpProjectResolver(ctx));
+    if (!res.ok) return err(res.error);
+    return ok(res.value, `updated memory ${res.value.id}`);
+  },
+};
 
-    // Authorize write.
-    if (existing.scope === "user") {
-      if (existing.userId !== ctx.userId) return err("not found");
-    } else if (existing.projectId) {
-      const allowed = await canWriteProject(ctx.userId, ctx.groups, existing.projectId);
-      if (!allowed) return err("no write access to this project");
-    }
+const memoryPatch: ToolDef = {
+  name: "memory.patch",
+  description:
+    "Replace one exact snippet of a memory's content, leaving the rest untouched — the same mental model as editing a file. Use this INSTEAD of memory.update whenever you're making a small edit to a large memory: adding an entry under a heading, correcting a line, updating a status. memory.update requires you to resend the entire document, which risks silently dropping content you didn't mean to touch; memory.patch only needs the fragment you're changing. `old_string` must appear EXACTLY once — if it's missing or ambiguous the call fails and nothing is changed, so include enough surrounding context to make it unique. Pass an empty `new_string` to delete the matched text. Re-embeds automatically, preserves the memory's id, and accepts `version` for the same concurrent-edit protection as memory.update.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      id: { type: "string", format: "uuid" },
+      old_string: {
+        type: "string",
+        description:
+          "The exact text to replace. Must occur exactly once in the memory's content — include surrounding lines if the fragment alone would be ambiguous.",
+      },
+      new_string: {
+        type: "string",
+        description:
+          "The replacement text. May be empty to delete the matched text (the memory itself may not be left empty).",
+      },
+      version: {
+        type: "integer",
+        minimum: 0,
+        description:
+          "Optimistic-locking token from memory.get / memory.list. When supplied, the patch is rejected if the row was edited by someone else since you read it.",
+      },
+    },
+    required: ["id", "old_string", "new_string"],
+  },
+  async handler(args, ctx) {
+    const parsed = MemoryPatchInput.safeParse(args);
+    if (!parsed.success) return err(parsed.error.message);
 
-    const update: Record<string, unknown> = {
-      updatedAt: new Date(),
-      lastEditedBy: ctx.userId,
-      version: existing.version + 1,
-    };
-    if (parsed.data.tags !== undefined) update.tags = parsed.data.tags;
-    if (parsed.data.content !== undefined && parsed.data.content !== existing.content) {
-      update.content = parsed.data.content;
-      update.embedding = await embedText(parsed.data.content);
-    }
+    const res = await patchMemory(mcpActor(ctx), parsed.data);
+    if (!res.ok) return err(res.error);
 
-    let scopeChanged = false;
-    let projectChanged = false;
-    let newProjectKey: string | null = existing.projectKey ?? null;
-
-    if (parsed.data.scope !== undefined) {
-      if (parsed.data.scope === "user") {
-        if (existing.scope !== "user") {
-          update.scope = "user";
-          scopeChanged = true;
-        }
-        if (existing.projectId !== null) {
-          update.projectId = null;
-          projectChanged = true;
-          newProjectKey = null;
-        }
-      } else {
-        // scope === 'project' — schema refine guarantees `project` is set.
-        const projectKey = parsed.data.project!;
-        const projectId = await resolveProjectId(ctx, projectKey);
-        if (!projectId) {
-          return err(`unknown project '${projectKey}'; call project.identify first`);
-        }
-        // Moving INTO a project requires write access there.
-        const allowedTarget = await canWriteProject(ctx.userId, ctx.groups, projectId);
-        if (!allowedTarget) {
-          return err(`no write access to project '${projectKey}'`);
-        }
-        if (existing.scope !== "project") {
-          update.scope = "project";
-          scopeChanged = true;
-        }
-        if (existing.projectId !== projectId) {
-          update.projectId = projectId;
-          projectChanged = true;
-          newProjectKey = projectKey;
-        }
-      }
-    }
-
-    const expectedVersion = parsed.data.version ?? existing.version;
-    const updated = await db
-      .update(memories)
-      .set(update)
-      .where(
-        and(
-          eq(memories.id, parsed.data.id),
-          eq(memories.version, expectedVersion),
-        ),
-      )
-      .returning({
-        id: memories.id,
-        updatedAt: memories.updatedAt,
-        version: memories.version,
-      });
-
-    if (!updated[0]) return err(CONCURRENT_EDIT_ERROR);
-
-    const auditFields = Object.keys(update).filter(
-      (k) => k !== "updatedAt" && k !== "version" && k !== "lastEditedBy",
+    const { id, delta, contentLength } = res.value;
+    return ok(
+      res.value,
+      `patched memory ${id} (${delta >= 0 ? "+" : ""}${delta} chars, now ${contentLength})`,
     );
-    const auditPayload: Record<string, unknown> = { fields: auditFields };
-    if (scopeChanged || projectChanged) {
-      auditPayload.scope = {
-        from: existing.scope,
-        to: update.scope ?? existing.scope,
-      };
-      auditPayload.projectKey = {
-        from: existing.projectKey ?? null,
-        to: newProjectKey,
-      };
-    }
-
-    await db.insert(auditLog).values({
-      userId: ctx.userId,
-      actor: "mcp",
-      action: "memory.update",
-      entityType: "memory",
-      entityId: updated[0]!.id,
-      payload: auditPayload,
-    });
-
-    return ok(updated[0]!, `updated memory ${updated[0]!.id}`);
   },
 };
 
@@ -1113,6 +999,7 @@ export const tools: ToolDef[] = [
   projectIdentify,
   memoryWrite,
   memoryUpdate,
+  memoryPatch,
   memoryList,
   memoryGet,
   memorySearch,

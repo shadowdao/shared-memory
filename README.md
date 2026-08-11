@@ -595,6 +595,80 @@ The OIDC client you use locally must accept
 
 ---
 
+## Running the tests
+
+```bash
+pnpm test          # all packages
+pnpm --filter @shared-memory/web test:watch
+```
+
+Unit tests (e.g. `lib/memory-patch.test.ts`) need nothing but `pnpm install`.
+
+The integration tests in `lib/mcp/tools.integration.test.ts` exercise the
+real tool handlers against a **real Postgres with pgvector** — they assert on
+stored rows, so there is no mock DB to drift from production behaviour. Spin
+one up:
+
+```bash
+docker run -d --name sm-test-db \
+  -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test \
+  -e POSTGRES_DB=shared_memory_test \
+  -p 55432:5432 pgvector/pgvector:pg16
+
+for f in apps/web/drizzle/*.sql; do
+  docker exec -i sm-test-db psql -U test -d shared_memory_test -v ON_ERROR_STOP=1 -q < "$f"
+done
+
+pnpm test
+```
+
+The default `DATABASE_URL` assumes the published port is reachable on
+localhost. If your test runner is itself inside a container, point it at the
+database container's address instead:
+
+```bash
+DATABASE_URL="postgres://test:test@$(docker inspect -f \
+  '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' sm-test-db):5432/shared_memory_test" \
+  pnpm test
+```
+
+The embedder sidecar is stubbed in tests (it's an external ML service); the
+stub is deterministic per-text, so re-embedding is verified by asserting the
+stored vector actually changed — not by asserting a mock was called.
+
+Teardown: `docker rm -f sm-test-db`.
+
+### Linting
+
+```bash
+pnpm lint
+```
+
+Runs the ESLint CLI directly against `eslint.config.mjs`. Note that `next
+lint` is deprecated (it goes away in Next 16) and had never been configured
+here, so this replaces it. `eslint-config-next` is still published in the
+legacy `.eslintrc` format, so the config bridges it through `FlatCompat`;
+that bridge can be dropped once the package ships a native flat export.
+
+The tree is currently clean at `--max-warnings=0`, so adding that flag to
+the `lint` script is a cheap way to keep it that way.
+
+---
+
+## Design notes
+
+`docs/` holds decision records for changes whose reasoning isn't recoverable
+from the diff — what was built, what was deliberately rejected, and what would
+reopen a closed question.
+
+- [`docs/memory-api-improvements.md`](docs/memory-api-improvements.md) — why
+  `memory_get` stopped returning the embedding and tsvector, why `memory_patch`
+  refuses ambiguous matches instead of guessing, why `memory_append` was
+  dropped, and why file-mirroring was left as a convention rather than
+  mechanised.
+
+---
+
 ## Troubleshooting
 
 - **`401 claim invalid: aud`** from `/api/mcp` — your MCP client isn't
