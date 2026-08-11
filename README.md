@@ -655,6 +655,20 @@ the `lint` script is a cheap way to keep it that way.
 
 ---
 
+## Design notes
+
+`docs/` holds decision records for changes whose reasoning isn't recoverable
+from the diff — what was built, what was deliberately rejected, and what would
+reopen a closed question.
+
+- [`docs/memory-api-improvements.md`](docs/memory-api-improvements.md) — why
+  `memory_get` stopped returning the embedding and tsvector, why `memory_patch`
+  refuses ambiguous matches instead of guessing, why `memory_append` was
+  dropped, and why file-mirroring was left as a convention rather than
+  mechanised.
+
+---
+
 ## Troubleshooting
 
 - **`401 claim invalid: aud`** from `/api/mcp` — your MCP client isn't
