@@ -117,6 +117,7 @@ services:
       # added to .env but not listed here never reaches the container.
       OIDC_ISSUER_MCP: ${OIDC_ISSUER_MCP:-}
       OIDC_AUDIENCE_SCOPE: ${OIDC_AUDIENCE_SCOPE:-}
+      OIDC_OFFLINE_ACCESS: ${OIDC_OFFLINE_ACCESS:-}
       PLUGIN_MARKETPLACE_URL: ${PLUGIN_MARKETPLACE_URL:-}
       PLUGIN_MARKETPLACE_NAME: ${PLUGIN_MARKETPLACE_NAME:-shared-memory}
 
