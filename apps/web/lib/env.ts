@@ -52,6 +52,20 @@ const envSchema = z.object({
   // Defaults to the `aud-<audience>` convention used in the README setup.
   OIDC_AUDIENCE_SCOPE: optional(z.string().min(1)),
 
+  // Advertise `offline_access` in the protected-resource metadata.
+  //
+  // Without it the IdP issues an access token and NO refresh token, so an
+  // MCP client cannot renew silently — it has to send the user back through
+  // an interactive login every time the access token expires. Turning this
+  // on is what makes long-lived sessions stop dropping out.
+  //
+  // Defaults OFF because it is only half the fix: the IdP must also have an
+  // `offline_access` scope mapping on the provider. Advertising a scope the
+  // IdP doesn't offer risks an `invalid_scope` rejection that would break
+  // authentication outright, so a deployment opts in only after configuring
+  // its IdP. See README -> "Keeping sessions alive".
+  OIDC_OFFLINE_ACCESS: Bool.optional().default(false),
+
   // Database
   DATABASE_URL: z.string().url(),
 
@@ -119,6 +133,7 @@ function buildPhaseStub(): Env {
     CLI_TOKEN_SECRET: "build-phase-secret-not-used-at-runtime-xxxxxxxx",
     PLUGIN_MARKETPLACE_NAME: "shared-memory",
     ALLOW_INSECURE_HTTP: false,
+    OIDC_OFFLINE_ACCESS: false,
   };
 }
 

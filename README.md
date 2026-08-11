@@ -291,8 +291,48 @@ tokens carry `aud: shared-memory` (or whatever value you chose).
 - **Client ID:** auto-generated → copy to `.env` as `OIDC_CLIENT_ID_MCP`
 - **Redirect URIs:** Claude Code prints the exact value when it first
   connects to the MCP endpoint. Paste it into Authentik then.
-- **Scopes:** `openid`, `profile`, `email`
+- **Scopes:** `openid`, `profile`, `email` (plus `offline_access` — see
+  **Keeping sessions alive** below)
 - **Signing Key:** same cert as the Web provider
+
+#### Keeping sessions alive (`offline_access`)
+
+Without this, a connected MCP client gets an access token and **no refresh
+token**. It cannot renew silently, so the moment the access token expires the
+client reports `requires re-authorization (token expired)` and the user has to
+log in again — repeatedly, on a short cycle.
+
+Two changes are required, and **neither works alone**:
+
+1. **In Authentik**, edit the `shared-memory-mcp` provider and add the built-in
+   `authentik default OAuth Mapping: offline_access` to its **Scopes**. You can
+   confirm it took by checking that `offline_access` appears in:
+
+   ```bash
+   curl -s https://auth.example.com/application/o/shared-memory-mcp/.well-known/openid-configuration \
+     | jq .scopes_supported
+   ```
+
+2. **In `.env`**, set `OIDC_OFFLINE_ACCESS=true` and redeploy.
+
+Step 2 is needed because a client only requests the scopes advertised in our
+`/.well-known/oauth-protected-resource` document — the same mechanism that
+makes the `aud` scope mapping necessary below. Step 1 is needed because
+Authentik only issues a refresh token when a configured mapping is requested.
+
+It is left opt-in rather than always-on because advertising a scope the IdP
+doesn't offer risks an `invalid_scope` rejection that breaks authentication
+outright. Configure the IdP first, then flip the flag.
+
+Verify afterwards with:
+
+```bash
+curl -s https://memory.example.com/.well-known/oauth-protected-resource | jq .scopes_supported
+```
+
+If interactive login isn't practical at all — a headless container, CI — skip
+OAuth and use a static bearer token instead (**D. Static bearer token**, below);
+those default to a 90-day lifetime.
 
 #### Setting the `aud` claim
 
