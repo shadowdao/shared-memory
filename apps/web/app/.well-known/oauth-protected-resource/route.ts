@@ -21,13 +21,24 @@ export function GET() {
   const audienceScope =
     env().OIDC_AUDIENCE_SCOPE ?? `aud-${env().OIDC_AUDIENCE}`;
 
+  // Same mechanism as the audience scope, different consequence: a client
+  // only requests `offline_access` if it sees the name here, and without
+  // that request the IdP returns no refresh token — so the client cannot
+  // renew and the user gets kicked back to an interactive login whenever
+  // the access token expires.
+  //
+  // Opt-in, because the IdP needs a matching scope mapping; advertising one
+  // it doesn't offer can fail the whole authorization request.
+  const scopes = ["openid", "profile", "email", audienceScope];
+  if (env().OIDC_OFFLINE_ACCESS) scopes.push("offline_access");
+
   return NextResponse.json({
     resource,
     // The MCP application's issuer, which is not necessarily the Web UI's —
     // see mcpIssuer(). Advertising the wrong one sends clients to a discovery
     // document whose tokens this endpoint will then reject on `iss`.
     authorization_servers: [mcpIssuer()],  // as configured, slash and all
-    scopes_supported: ["openid", "profile", "email", audienceScope],
+    scopes_supported: scopes,
     bearer_methods_supported: ["header"],
     resource_documentation: `${resource}/`,
   });
