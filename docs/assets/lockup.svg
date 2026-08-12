@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 283 64" width="283" height="64" role="img" aria-label="shared-memory">
+  <title>shared-memory</title>
+  <!--
+    Horizontal lockup for headers, docs, and the OAuth consent screen, where a
+    bare 64px glyph is too little and the full app header is too much.
+
+    Fixed-colour twin of apps/web/public/lockup.svg, for README and any other
+    context that references the file as <img src> - there currentColor resolves
+    to black and vanishes on a dark page. #0092fd holds on both git-host themes.
+
+    `textLength` is not decoration: the wordmark is set in whatever monospace
+    the viewer has, and without a locked advance width the text overruns the
+    viewBox on wider fonts.
+  -->
+  <g fill="none" stroke="#0092fd" stroke-linecap="round" stroke-width="7">
+    <path d="M12 16C24 16 25 32 30 32" opacity=".7"/>
+    <path d="M12 32H30"/>
+    <path d="M12 48C24 48 25 32 30 32" opacity=".7"/>
+  </g>
+  <circle cx="46" cy="32" r="8.5" fill="#0092fd"/>
+  <text x="72" y="41" fill="#0092fd" textLength="203" lengthAdjust="spacingAndGlyphs"
+        font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+        font-size="26" letter-spacing="-0.8">shared<tspan opacity=".45">-</tspan>memory</text>
+</svg>

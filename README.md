@@ -1,4 +1,4 @@
-# shared-memory
+# <img src="docs/assets/lockup.svg" alt="shared-memory" width="283">
 
 A self-hosted MCP server that gives Claude Code sessions a **shared, persistent
 memory** plus a **reusable snippet library**, behind your own OIDC login.
