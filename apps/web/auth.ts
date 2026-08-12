@@ -1,7 +1,6 @@
 import NextAuth from "next-auth";
 import { env } from "@/lib/env";
-import { db } from "@/lib/db/client";
-import { users } from "@/lib/db/schema";
+import { oidClaim, resolveUserId } from "@/lib/auth/identity";
 import { syncUserGroupsFromClaim } from "@/lib/auth/sync-groups";
 
 /**
@@ -41,27 +40,18 @@ export const { auth, handlers, signIn, signOut } = NextAuth({
         const iss = (profile.iss as string | undefined) ?? env().OIDC_ISSUER;
         if (!sub) throw new Error("OIDC profile missing `sub` claim");
 
-        const row = await db
-          .insert(users)
-          .values({
-            oidcSub: sub,
-            oidcIss: iss,
-            email: profile.email ?? null,
-            name: profile.name ?? null,
-            picture: (profile.picture as string | undefined) ?? null,
-          })
-          .onConflictDoUpdate({
-            target: [users.oidcIss, users.oidcSub],
-            set: {
-              email: profile.email ?? null,
-              name: profile.name ?? null,
-              picture: (profile.picture as string | undefined) ?? null,
-              lastSeenAt: new Date(),
-            },
-          })
-          .returning({ id: users.id });
+        // Shared with the MCP path (lib/mcp/context.ts). On EntraID the `oid`
+        // claim is what keeps the two surfaces resolving to one account —
+        // `sub` differs per app registration there. See lib/auth/identity.ts.
+        const userId = await resolveUserId({
+          iss,
+          sub,
+          oid: oidClaim(profile),
+          email: profile.email ?? null,
+          name: profile.name ?? null,
+          picture: (profile.picture as string | undefined) ?? null,
+        });
 
-        const userId = row[0]?.id;
         token.userId = userId;
         token.sub = sub;
         token.iss = iss;
@@ -71,10 +61,15 @@ export const { auth, handlers, signIn, signOut } = NextAuth({
         // wipes the user's existing memberships, which is the conservative
         // choice (don't keep stale grants alive if the IdP stopped
         // asserting them).
+        //
+        // The whole profile goes in, not just `profile.groups`: an absent
+        // claim means one thing on its own and something else entirely next
+        // to EntraID's overage markers, and only the second case must abort.
+        // A GroupsOverageError thrown here fails the sign-in, which is the
+        // intent — it leaves the user's existing memberships untouched
+        // instead of silently deleting them.
         if (userId) {
-          // `profile.groups` is untyped at the next-auth boundary — coerce.
-          const claimGroups = (profile as { groups?: unknown }).groups;
-          await syncUserGroupsFromClaim(userId, iss, claimGroups);
+          await syncUserGroupsFromClaim(userId, iss, profile);
         }
       }
       return token;

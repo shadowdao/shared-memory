@@ -3,33 +3,98 @@ import { db } from "@/lib/db/client";
 import { groups, userGroups } from "@/lib/db/schema";
 
 /**
+ * Raised when the IdP signals that it holds group memberships it declined to
+ * enumerate (EntraID's "groups overage"). Callers must abort — see
+ * `detectGroupsOverage` for why this cannot be treated as "no groups".
+ */
+export class GroupsOverageError extends Error {
+  constructor() {
+    super(
+      "OIDC groups overage: the identity provider signalled group membership " +
+        "it did not enumerate, so the user's groups cannot be determined. On " +
+        "EntraID, set the app registration's `groupMembershipClaims` to " +
+        '"ApplicationGroup" (portal: "Groups assigned to the application") and ' +
+        "assign the groups you share projects with. See docs/oidc-entra-id.md " +
+        "§10b.",
+    );
+    this.name = "GroupsOverageError";
+  }
+}
+
+/**
+ * Does this token say "there are groups, but I'm not listing them"?
+ *
+ * EntraID stops emitting `groups` past 200 entries in a JWT (150 in SAML, 5 in
+ * implicit flow) and substitutes a pointer:
+ *
+ *     "_claim_names":   { "groups": "src1" },
+ *     "_claim_sources": { "src1": { "endpoint": "https://graph.windows.net/…" } }
+ *
+ * or, for implicit flow, `"hasgroups": true`.
+ *
+ * This is NOT a truncated list — it is no list at all, and it is materially
+ * different from "this user belongs to zero groups". Conflating the two is
+ * what made this dangerous: the absent-claim branch below deletes every one of
+ * the user's memberships, so a user crossing the 200-group line would silently
+ * lose access to every shared project on both surfaces, with no error raised
+ * anywhere.
+ *
+ * We refuse instead. Group state gates `readableProjectIds` / `canWriteProject`,
+ * and granting or revoking access on state we know we don't have is guesswork
+ * either way. Failing loudly destroys nothing and names its own fix.
+ */
+export function detectGroupsOverage(claims: unknown): boolean {
+  const c = claims as
+    | { _claim_names?: unknown; hasgroups?: unknown }
+    | null
+    | undefined;
+  if (!c || typeof c !== "object") return false;
+  if (c.hasgroups === true) return true;
+  const names = c._claim_names;
+  return (
+    typeof names === "object" &&
+    names !== null &&
+    "groups" in (names as Record<string, unknown>)
+  );
+}
+
+/**
  * Sync a user's group memberships from the OIDC `groups` claim on sign-in.
  *
+ * Takes the whole claims object, not just the claim value, because deciding
+ * what an absent `groups` means requires seeing the overage markers that sit
+ * beside it.
+ *
  * Claim shape: `string[]`. Authentik emits group *names* directly here;
- * Keycloak and Okta likewise (with the right mappers configured). EntraID,
- * when correctly configured per README, emits names too — but the default
- * "groups" optional-claim variant emits object-id GUIDs instead, and if the
- * user is in too many groups EntraID switches to a "groups overage"
- * indicator (no group list at all). We take the conservative path:
+ * Keycloak and Okta likewise (with the right mappers configured). EntraID
+ * emits object-id GUIDs by default — `cloud_displayname` gets you names, but
+ * only under `groupMembershipClaims: "ApplicationGroup"`, and only for
+ * directly assigned groups. See docs/oidc-entra-id.md §10a.
  *
  *   - whatever strings appear in the claim are treated as names verbatim
  *     and stored as-is. If your IdP emits GUIDs, the UI will show GUIDs;
  *     fix it at the IdP layer (we don't attempt resolution).
  *   - if the claim is missing/empty, the user is treated as having zero
- *     groups and all existing memberships are deleted.
- *   - groups overage (where EntraID emits `_claim_names.groups` instead of
- *     `groups`) is not handled in v1 — the user appears as having no
- *     groups. Documented limit; revisit if it bites someone.
+ *     groups and all existing memberships are deleted. That is the
+ *     conservative reading: don't keep stale grants alive once the IdP has
+ *     stopped asserting them.
+ *   - if the IdP signals an overage, we throw rather than apply either
+ *     reading. See `detectGroupsOverage`.
  *
  * The whole operation runs in a single transaction so the membership
  * snapshot is atomic (no window where a user partially has new memberships
  * and still has stale ones).
+ *
+ * @throws {GroupsOverageError} when the claims carry an overage indicator.
  */
 export async function syncUserGroupsFromClaim(
   userId: string,
   oidcIss: string,
-  rawClaim: unknown,
+  claims: unknown,
 ): Promise<void> {
+  if (detectGroupsOverage(claims)) throw new GroupsOverageError();
+
+  const rawClaim = (claims as { groups?: unknown } | null | undefined)?.groups;
   const names = normalizeGroupsClaim(rawClaim);
 
   await db.transaction(async (tx) => {
