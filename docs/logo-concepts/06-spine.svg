@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Spine">
+  <title>Spine</title>
+  <!-- An index: many entries on one shared spine, the active one reaching furthest. -->
+  <g fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round">
+    <path d="M16 13V51"/>
+    <path d="M16 21H34" opacity=".5"/>
+    <path d="M16 32H42"/>
+    <path d="M16 43H34" opacity=".5"/>
+  </g>
+  <circle cx="52" cy="32" r="5" fill="currentColor"/>
+</svg>

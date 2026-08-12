@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Braid">
+  <title>Braid</title>
+  <!--
+    Two independent threads woven into one strand - neither is subordinate,
+    and the weave is what holds. Crossings computed at (20,32) and (44,32);
+    the mask punches the first one so strand A reads as passing over it.
+  -->
+  <mask id="sm-braid-gap">
+    <rect width="64" height="64" fill="#fff"/>
+    <circle cx="20" cy="32" r="6.25" fill="#000"/>
+  </mask>
+  <g fill="none" stroke="currentColor" stroke-width="6.5" stroke-linecap="round">
+    <path d="M8 20C20 20 20 44 32 44 44 44 44 20 56 20" opacity=".75"/>
+    <path d="M8 44C20 44 20 20 32 20 44 20 44 44 56 44" mask="url(#sm-braid-gap)"/>
+  </g>
+</svg>
