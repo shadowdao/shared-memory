@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Current mark, rebalanced">
+  <title>Current mark, rebalanced</title>
+  <!--
+    The shipped mark with three changes aimed at 16px: strokes stop earlier so
+    the gap to the node survives rasterisation, outer opacity raised .45 -> .7
+    so the neighbours don't drop out, node enlarged 7.5 -> 8.5.
+  -->
+  <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="7">
+    <path d="M12 16C24 16 25 32 30 32" opacity=".7"/>
+    <path d="M12 32H30"/>
+    <path d="M12 48C24 48 25 32 30 32" opacity=".7"/>
+  </g>
+  <circle cx="46" cy="32" r="8.5" fill="currentColor"/>
+</svg>

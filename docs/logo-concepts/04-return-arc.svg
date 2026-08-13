@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Return arc">
+  <title>Return arc</title>
+  <!-- Write, leave, come back to it. The gap is where the next session enters. -->
+  <path d="M42.3 46.7A18 18 0 1 1 42.3 17.3" fill="none" stroke="currentColor"
+        stroke-width="6.5" stroke-linecap="round" opacity=".7"/>
+  <circle cx="30" cy="32" r="7.5" fill="currentColor"/>
+</svg>
