@@ -37,8 +37,10 @@ Workspace. Anything that publishes a `/.well-known/openid-configuration`.
 
 The same container serves both the MCP endpoint (under `/api/mcp`) and the
 Web UI. Users authenticate via your OIDC provider with pre-registered
-confidential clients. Identity is keyed on the OIDC `sub` + `iss` so
-memories are scoped per user.
+confidential clients. Identity is keyed on the OIDC `iss` + `sub` so memories
+are scoped per user — except on Microsoft Entra ID, where `sub` is pairwise
+(a different value per app registration for the same person) and `oid` is
+used instead. See [`docs/oidc-entra-id.md`](docs/oidc-entra-id.md) §7.
 
 ---
 
