@@ -5,12 +5,17 @@
     Three retrieval signals - vector, full-text, tags - converging on a single
     memory. The direct match runs straight through at full strength; the two
     ranked neighbours fall back, which is the fusion the search actually does.
-    Opacity is held equal on the outer pair so the mark stays balanced at 16px.
+
+    Every proportion here is set by the 16px browser-tab case. The outer pair
+    is held at .7 (not .55) because below that it rasterises away entirely,
+    the strokes stop at x=30 so the gap to the node doesn't fill in, and the
+    node is r=8.5 so it still reads as a disc. Geometry is identical to
+    public/logo.svg; only the palette differs.
   -->
   <g fill="none" stroke-linecap="round" stroke-width="7">
-    <path d="M13 15C25 15 26 32 35 32" stroke="#0092fd" opacity=".55"/>
-    <path d="M13 32H35" stroke="#49a9ff"/>
-    <path d="M13 49C25 49 26 32 35 32" stroke="#0092fd" opacity=".55"/>
+    <path d="M12 16C24 16 25 32 30 32" stroke="#0092fd" opacity=".7"/>
+    <path d="M12 32H30" stroke="#49a9ff"/>
+    <path d="M12 48C24 48 25 32 30 32" stroke="#0092fd" opacity=".7"/>
   </g>
-  <circle cx="45" cy="32" r="7.5" fill="#76c0ff"/>
+  <circle cx="46" cy="32" r="8.5" fill="#76c0ff"/>
 </svg>

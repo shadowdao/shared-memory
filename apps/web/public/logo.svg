@@ -3,12 +3,20 @@
   <!--
     Transparent, currentColor variant of the mark for in-app use - inherits
     the surrounding text color so it works on any surface. The tile version
-    used as the favicon lives at app/icon.svg.
+    used as the favicon lives at app/icon.svg, and the horizontal lockup at
+    public/lockup.svg.
+
+    Three retrieval signals converging on a single memory. Proportions are
+    set by the 16px case, which is the one that breaks: the strokes stop at
+    x=30 so the gap to the node survives rasterisation, the outer pair sits
+    at .7 rather than .45 so it doesn't drop out, and the node is r=8.5.
+    The earlier proportions rendered as an indeterminate smear in a browser
+    tab.
   -->
   <g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="7">
-    <path d="M13 15C25 15 27 32 37 32" opacity=".45"/>
-    <path d="M13 32H37"/>
-    <path d="M13 49C25 49 27 32 37 32" opacity=".7"/>
+    <path d="M12 16C24 16 25 32 30 32" opacity=".7"/>
+    <path d="M12 32H30"/>
+    <path d="M12 48C24 48 25 32 30 32" opacity=".7"/>
   </g>
-  <circle cx="43" cy="32" r="8" fill="currentColor"/>
+  <circle cx="46" cy="32" r="8.5" fill="currentColor"/>
 </svg>
