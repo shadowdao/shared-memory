@@ -2,13 +2,14 @@ import { createRemoteJWKSet, jwtVerify, errors as joseErrors } from "jose";
 import type { JWTPayload } from "jose";
 import { env } from "@/lib/env";
 import { CLI_TOKEN_KID, tokenKid, verifyCliToken } from "./cli-token";
+import { detectGroupsOverage } from "./sync-groups";
 
 /**
  * Authenticates a bearer token presented to the MCP endpoint. Two token
  * kinds are accepted, dispatched by the JWT `kid` header:
  *
- *   - Authentik-issued OIDC access tokens (any kid) — verified against
- *     Authentik's JWKS over the network.
+ *   - IdP-issued OIDC access tokens (any kid) — verified against the
+ *     issuer's JWKS over the network, located via OIDC discovery.
  *   - CLI tokens minted at /connect (kid="cli-v1") — verified locally
  *     with the HMAC CLI_TOKEN_SECRET.
  *
@@ -18,8 +19,25 @@ import { CLI_TOKEN_KID, tokenKid, verifyCliToken } from "./cli-token";
  * This is distinct from the NextAuth session cookie path used by the Web UI.
  */
 
+type JwkSet = ReturnType<typeof createRemoteJWKSet>;
+
 type GlobalWithJwks = typeof globalThis & {
-  __sharedMemoryJwks?: ReturnType<typeof createRemoteJWKSet>;
+  /**
+   * Resolved key set, cached as a *promise* rather than a value.
+   *
+   * Resolution now involves a network round-trip (OIDC discovery), and the
+   * MCP endpoint verifies a token on essentially every request. Caching the
+   * settled value would leave a window in which N concurrent cold requests
+   * each start their own discovery fetch; caching the in-flight promise means
+   * the first caller does the work and everyone else awaits the same result.
+   */
+  __sharedMemoryJwks?: Promise<JwkSet>;
+  /**
+   * Epoch ms after which discovery should be re-attempted, set only when we
+   * had to fall back (see `jwks()`). Undefined means the cached set came from
+   * a successful discovery and is good indefinitely.
+   */
+  __sharedMemoryJwksRetryAt?: number;
 };
 const g = globalThis as GlobalWithJwks;
 
@@ -27,6 +45,10 @@ const g = globalThis as GlobalWithJwks;
  * Issuer of MCP access tokens. The MCP endpoint is a separate application in
  * the IdP from the Web UI, and Authentik stamps each token with its own
  * application slug, so this is NOT interchangeable with OIDC_ISSUER.
+ *
+ * Not every IdP works that way: EntraID has one issuer per tenant regardless
+ * of how many app registrations you create, so OIDC_ISSUER_MCP is left unset
+ * there and this falls through to OIDC_ISSUER.
  */
 export function mcpIssuer(): string {
   return env().OIDC_ISSUER_MCP ?? env().OIDC_ISSUER;
@@ -50,16 +72,88 @@ function acceptedIssuers(): [string, string] {
   return [bare, `${bare}/`];
 }
 
-function jwks() {
-  if (g.__sharedMemoryJwks) return g.__sharedMemoryJwks;
-  // Authentik discovery is at `${issuer}/.well-known/openid-configuration`;
-  // the JWKS URI is normally `${issuer}/jwks/` or `${issuer}/.well-known/jwks.json`.
-  // Authentik canonically serves `${issuer}/jwks/`.
-  const url = new URL(`${mcpIssuer().replace(/\/$/, "")}/jwks/`);
-  g.__sharedMemoryJwks = createRemoteJWKSet(url, {
-    cacheMaxAge: 10 * 60 * 1000, // 10 min
-    cooldownDuration: 30 * 1000,
-  });
+const JWKS_OPTIONS = {
+  cacheMaxAge: 10 * 60 * 1000, // 10 min
+  cooldownDuration: 30 * 1000,
+} as const;
+
+/** How long to keep serving a fallback key set before retrying discovery. */
+const DISCOVERY_RETRY_COOLDOWN_MS = 60 * 1000;
+
+/** Discovery can hang; every MCP request waits on it, so bound it. */
+const DISCOVERY_TIMEOUT_MS = 5 * 1000;
+
+/**
+ * The pre-discovery convention: `${issuer}/jwks/`.
+ *
+ * This is Authentik's canonical JWKS path and was hardcoded here. It stays as
+ * the fallback so that a deployment whose discovery document is unreachable
+ * behaves exactly as it did before this change.
+ */
+function fallbackJwksUri(): string {
+  return `${mcpIssuer().replace(/\/$/, "")}/jwks/`;
+}
+
+/**
+ * Read `jwks_uri` out of the MCP issuer's OIDC discovery document.
+ *
+ * `${issuer}/jwks/` is an Authentik convention, not a standard — RFC 8414
+ * says the key set lives wherever `jwks_uri` points, and providers disagree
+ * wildly. EntraID serves keys at
+ * `https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys`, nowhere
+ * near `${issuer}/jwks/`, so with the path hardcoded every EntraID-issued MCP
+ * token fails verification with a 404 on the key set — authentication is
+ * simply impossible, not merely misconfigured. Ask the issuer where its keys
+ * are instead of guessing.
+ *
+ * Returns null (never throws) on any failure, so the caller can fall back.
+ */
+async function discoverJwksUri(): Promise<string | null> {
+  const url = `${mcpIssuer().replace(/\/$/, "")}/.well-known/openid-configuration`;
+  try {
+    const res = await fetch(url, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const doc: unknown = await res.json();
+    const uri = (doc as { jwks_uri?: unknown } | null)?.jwks_uri;
+    if (typeof uri !== "string" || uri.trim().length === 0) return null;
+    // A malformed jwks_uri must not blow up the request path.
+    new URL(uri);
+    return uri;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The key set MCP access tokens are verified against, resolved once per
+ * process.
+ *
+ * Async because discovery is a network call. The cached promise is installed
+ * synchronously — before the first `await` inside the IIFE runs — so
+ * concurrent callers always join the existing resolution rather than racing
+ * to start their own.
+ *
+ * When discovery fails we serve the legacy fallback but arm a retry: a single
+ * blip at process start would otherwise pin the wrong URL for the lifetime of
+ * the container, which on EntraID means MCP auth stays broken until someone
+ * restarts it. The cooldown keeps a persistently-unreachable discovery
+ * endpoint from being hit on every request.
+ */
+function jwks(): Promise<JwkSet> {
+  const retryAt = g.__sharedMemoryJwksRetryAt;
+  const dueForRetry = retryAt !== undefined && Date.now() >= retryAt;
+  if (g.__sharedMemoryJwks && !dueForRetry) return g.__sharedMemoryJwks;
+
+  g.__sharedMemoryJwksRetryAt = undefined;
+  g.__sharedMemoryJwks = (async () => {
+    const discovered = await discoverJwksUri();
+    if (discovered) return createRemoteJWKSet(new URL(discovered), JWKS_OPTIONS);
+    g.__sharedMemoryJwksRetryAt = Date.now() + DISCOVERY_RETRY_COOLDOWN_MS;
+    return createRemoteJWKSet(new URL(fallbackJwksUri()), JWKS_OPTIONS);
+  })();
   return g.__sharedMemoryJwks;
 }
 
@@ -143,7 +237,7 @@ export async function authenticateBearer(authHeader: string | null): Promise<Aut
       } as AuthenticatedClaims;
     }
 
-    const { payload } = await jwtVerify(token, jwks(), {
+    const { payload } = await jwtVerify(token, await jwks(), {
       issuer: acceptedIssuers(),
       audience: env().OIDC_AUDIENCE,
     });
@@ -152,6 +246,17 @@ export async function authenticateBearer(authHeader: string | null): Promise<Aut
         "token missing sub claim",
         buildWwwAuthenticate("invalid_token", "missing sub"),
       );
+    }
+    // Groups overage: the IdP is telling us it holds memberships it declined
+    // to list. `extractGroupsClaim` would read that as "no claim emitted" and
+    // userContextFromClaims would fall back to the DB snapshot — granting
+    // project access from a stale record while the live state is admittedly
+    // unknown. Refuse; the operator fix is in the description.
+    if (detectGroupsOverage(payload)) {
+      const desc =
+        "groups overage: IdP did not enumerate group membership " +
+        "(set groupMembershipClaims=ApplicationGroup on EntraID)";
+      throw new UnauthorizedError(desc, buildWwwAuthenticate("invalid_token", desc));
     }
     // Normalize the issuer for identity purposes.
     //

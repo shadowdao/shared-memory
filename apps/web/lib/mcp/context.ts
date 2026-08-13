@@ -1,6 +1,7 @@
 import { db } from "@/lib/db/client";
-import { users, groups, userGroups } from "@/lib/db/schema";
-import { and, eq } from "drizzle-orm";
+import { groups, userGroups } from "@/lib/db/schema";
+import { eq } from "drizzle-orm";
+import { oidClaim, resolveUserId } from "@/lib/auth/identity";
 import type { AuthenticatedClaims } from "@/lib/auth/jwt";
 
 /**
@@ -55,37 +56,18 @@ export async function userContextFromClaims(
   const name = (claims.name as string | undefined) ?? null;
   const picture = (claims.picture as string | undefined) ?? null;
 
-  const row = await db
-    .insert(users)
-    .values({
-      oidcSub: claims.sub,
-      oidcIss: claims.iss,
-      email,
-      name,
-      picture,
-    })
-    .onConflictDoUpdate({
-      target: [users.oidcIss, users.oidcSub],
-      set: {
-        email,
-        name,
-        picture,
-        lastSeenAt: new Date(),
-      },
-    })
-    .returning({ id: users.id });
-
-  let userId = row[0]?.id;
-  if (!userId) {
-    // Race against another upsert — fall back to a select.
-    const existing = await db
-      .select({ id: users.id })
-      .from(users)
-      .where(and(eq(users.oidcIss, claims.iss), eq(users.oidcSub, claims.sub)))
-      .limit(1);
-    if (!existing[0]) throw new Error("user upsert failed and not found on re-read");
-    userId = existing[0].id;
-  }
+  // Shared with the Web UI sign-in path (auth.ts). Keeping one resolver is
+  // what stops the two surfaces disagreeing about who a user is — on EntraID
+  // they see different `sub` values for the same person and would otherwise
+  // each create their own account. See lib/auth/identity.ts.
+  const userId = await resolveUserId({
+    iss: claims.iss,
+    sub: claims.sub,
+    oid: oidClaim(claims),
+    email,
+    name,
+    picture,
+  });
 
   // OIDC bearer tokens carry a `groups` claim (when the IdP is configured to
   // emit it). CLI tokens never do — they go through verifyCliToken which

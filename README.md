@@ -249,6 +249,13 @@ shape is the same on any OIDC provider; the UI labels differ:
 | Redirect URI list | Provider's "Redirect URIs / Origins" | App's "Redirect URIs" | Client's "Valid Redirect URIs" |
 | Audience claim | Scope mapping or property mapping | "Expose an API" + scope | Client scope with audience mapper |
 
+> **Using Microsoft Entra ID?** The differences are large enough that Entra
+> gets its own walkthrough: **[docs/oidc-entra-id.md](docs/oidc-entra-id.md)**.
+> It follows the same A/B structure as the steps below, and covers the
+> Entra-specific traps — access token version, tenant-specific authority,
+> `aud` vs. scope URI, redirect-URI platform type, group GUIDs and overage —
+> which otherwise surface only as opaque 401s.
+
 ### A. Web UI provider
 
 **Admin → Applications → Providers → Create → OAuth2/OpenID Provider**

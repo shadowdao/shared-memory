@@ -53,6 +53,21 @@ export const users = pgTable(
     oidcSub: text("oidc_sub").notNull(),
     // OIDC `iss` so we can disambiguate if we ever federate.
     oidcIss: text("oidc_iss").notNull(),
+    /**
+     * EntraID `oid` — the user's directory object id.
+     *
+     * Null on IdPs that don't emit it (Authentik, Keycloak, Okta), where
+     * `sub` is already stable across applications and remains the key.
+     *
+     * EntraID's `sub` is PAIRWISE: it is derived from the token recipient,
+     * so the Web UI app registration and the MCP app registration produce
+     * different `sub` values for the same human. Keying on `sub` there
+     * silently creates two accounts for one person — sign in on the web,
+     * connect an MCP client, find an empty account. `oid` is the identifier
+     * Microsoft documents as constant for a user across every application in
+     * a tenant, so it takes precedence whenever it's present.
+     */
+    oidcOid: text("oidc_oid"),
     email: text("email"),
     name: text("name"),
     picture: text("picture"),
@@ -61,6 +76,11 @@ export const users = pgTable(
   },
   (t) => ({
     uniqueIss: uniqueIndex("users_iss_sub_uq").on(t.oidcIss, t.oidcSub),
+    // Partial: rows from IdPs that emit no `oid` all hold NULL here, and a
+    // plain unique index would collapse them into a single allowed row.
+    uniqueOid: uniqueIndex("users_iss_oid_uq")
+      .on(t.oidcIss, t.oidcOid)
+      .where(sql`${t.oidcOid} IS NOT NULL`),
   }),
 );
 
