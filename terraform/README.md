@@ -72,6 +72,16 @@ The redirect URI you register on the Web UI client is
 `https://${domain_name}/api/auth/callback/oidc`, so plan the domain name
 *before* configuring the IdP.
 
+The MCP client needs its own list, and most of it does not depend on the
+domain: a loopback URI for the Claude Code CLI, plus
+`https://claude.ai/api/mcp/auth_callback` if anyone will add the server as a
+claude.ai custom connector. Only the manual-paste fallback,
+`https://${domain_name}/auth/cli-callback`, follows the domain. See
+[Which redirect URIs to register](../README.md#which-redirect-uris-to-register)
+— a client can only register its own redirect URI against an IdP that offers
+Dynamic Client Registration, which Authentik gates behind an enterprise
+licence, so plan on adding all of these by hand.
+
 ---
 
 ## Quick start
