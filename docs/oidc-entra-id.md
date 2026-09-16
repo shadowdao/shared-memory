@@ -241,7 +241,7 @@ prompt. See README → *Which redirect URIs to register*.
 `http://localhost` redirect URIs, so the single registration
 `http://localhost/callback` matches `http://localhost:33418/callback`,
 `http://localhost:9999/callback`, and any other port. This is Entra's
-equivalent of the Authentik regex (`http://(localhost|127\.0\.0\.1):[0-9]+/.*`)
+equivalent of the Authentik regex (`^http://(127\.0\.0\.1|localhost):\d+(/.*)?$`)
 the README mentions — users can pick any `--callback-port` without
 re-registering.
 

@@ -318,7 +318,7 @@ first connection attempt:
   matching mode to **Regex** so any port works without re-registering:
 
   ```
-  http://(localhost|127\.0\.0\.1):[0-9]+/.*
+  ^http://(127\.0\.0\.1|localhost):\d+(/.*)?$
   ```
 
   **The port is not optional.** Authentik rejects a portless
@@ -571,7 +571,7 @@ What happens:
 `--callback-port` is required because your IdP only accepts pre-registered
 redirect URIs. Pick any free port; just make sure the matching URI is in
 your MCP client's **Redirect URIs** list. Authentik users with the regex
-entry from the setup step (`http://(localhost|127\.0\.0\.1):[0-9]+/.*`) can
+entry from the setup step (`^http://(127\.0\.0\.1|localhost):\d+(/.*)?$`) can
 use any port without re-registering.
 
 ### C. Manual-paste fallback (when loopback isn't reachable)
