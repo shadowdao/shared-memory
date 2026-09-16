@@ -41,8 +41,11 @@ export async function GET(
   ctx: { params: Promise<{ path: string[] }> },
 ): Promise<NextResponse> {
   const { path } = await ctx.params;
-  // Segments arrive already percent-decoded and never empty, but join and
-  // compare on the same normalized form the allowlist is written in.
+  // Next splits the matched suffix on literal `/` and only then decodes each
+  // piece, so a segment can be empty (`api//mcp` -> ["api","","mcp"]) and a
+  // single segment can itself contain a decoded slash (`api%2Fmcp` -> one
+  // element, "api/mcp"). Join and compare on the same normalized form the
+  // allowlist is written in, and let anything else fail closed.
   const resourcePath = path.join("/");
 
   if (!METADATA_RESOURCE_PATHS.has(resourcePath)) {
