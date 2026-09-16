@@ -298,11 +298,74 @@ tokens carry `aud: shared-memory` (or whatever value you chose).
   or `Confidential` if you prefer to issue a secret to each Claude Code
   install — both work. Phase 1 expects Public.
 - **Client ID:** auto-generated → copy to `.env` as `OIDC_CLIENT_ID_MCP`
-- **Redirect URIs:** Claude Code prints the exact value when it first
-  connects to the MCP endpoint. Paste it into Authentik then.
+- **Redirect URIs:** more than one, and which ones depends on how people
+  reach the server — see **Which redirect URIs to register** below.
 - **Scopes:** `openid`, `profile`, `email` (plus `offline_access` — see
   **Keeping sessions alive** below)
 - **Signing Key:** same cert as the Web provider
+
+#### Which redirect URIs to register
+
+The MCP provider is reached by clients of two different shapes — one running on
+your machine, one running inside claude.ai — and they come back from the IdP at
+**different** redirect URIs. Register every one you intend to use, before the
+first connection attempt:
+
+- **Claude Code CLI, including this repo's plugin** — the CLI catches the
+  callback on a loopback listener, so the URI is
+  `http://localhost:<port>/callback`, where `<port>` is whatever
+  `--callback-port` (or the plugin's `callbackPort`) is set to. Set the entry's
+  matching mode to **Regex** so any port works without re-registering:
+
+  ```
+  http://(localhost|127\.0\.0\.1):[0-9]+/.*
+  ```
+
+  **The port is not optional.** Authentik rejects a portless
+  `http://localhost/callback`, so an entry copied from the Entra ID walkthrough
+  — where the port component is ignored on purpose, see
+  [docs/oidc-entra-id.md](docs/oidc-entra-id.md) — matches nothing the CLI ever
+  sends.
+
+- **A claude.ai custom connector** — the server added through claude.ai's web
+  UI rather than installed locally. claude.ai brokers the OAuth flow, so the
+  browser never returns to your machine and the loopback entries above are
+  irrelevant. Register the exact string:
+
+  ```
+  https://claude.ai/api/mcp/auth_callback
+  ```
+
+- **The manual-paste fallback** (*C. Manual-paste fallback* below) — that
+  callback is hosted by *this* server, not by the client:
+
+  ```
+  https://memory.example.com/auth/cli-callback
+  ```
+
+> **A missing entry shows up as Authentik's "Redirect URI Error" page** — *"The
+> request fails due to a missing, invalid, or mismatching redirection URI
+> (redirect_uri)"* — served **after** the client sends you to Authentik but
+> **before** any login or consent screen. Nothing in the client says which URI
+> was rejected, so it reads as "the connector is broken" when the provider
+> simply has no entry matching what was sent. Adding the server as a claude.ai
+> connector without the `https://claude.ai/api/mcp/auth_callback` entry is the
+> common way to land here.
+>
+> **Nothing registers these for you — on a FOSS instance.** Authentik *does*
+> implement RFC 7591 Dynamic Client Registration
+> ([goauthentik/authentik#8751](https://github.com/goauthentik/authentik/issues/8751),
+> closed July 2026), but gated behind an **enterprise** licence; a maintainer
+> has since said it will move to the open-source build. Until it does, a FOSS
+> instance advertises no `registration_endpoint` at all. Check yours:
+>
+> ```
+> curl -s "${OIDC_ISSUER_MCP}.well-known/openid-configuration" | jq .registration_endpoint
+> ```
+>
+> `null` means no client — CLI or claude.ai — can add its own redirect URI, so
+> every URI above is typed into the provider by hand. (Same gap as **Why no
+> zero-config plugin yet** below.)
 
 #### Keeping sessions alive (`offline_access`)
 
@@ -413,6 +476,13 @@ prompt, never reaching the app.
 
 Three paths, in order of preference:
 
+> **Connecting from claude.ai instead?** A server added there as a *custom
+> connector* needs nothing on your machine, but its OAuth callback is
+> `https://claude.ai/api/mcp/auth_callback`, not a loopback URI. Register it on
+> the MCP provider first (**Which redirect URIs to register** above) or the
+> connector stops at Authentik's *Redirect URI Error* page before you ever see
+> a login prompt.
+
 ### A. Plugin (recommended — one command, no flags to remember)
 
 This repo doubles as a Claude Code plugin marketplace. `plugin/.mcp.json` ships a
@@ -501,8 +571,8 @@ What happens:
 `--callback-port` is required because your IdP only accepts pre-registered
 redirect URIs. Pick any free port; just make sure the matching URI is in
 your MCP client's **Redirect URIs** list. Authentik users with the regex
-pattern from the setup step (`^http://(127\.0\.0\.1|localhost):\d+/.*$`)
-can use any port without re-registering.
+entry from the setup step (`http://(localhost|127\.0\.0\.1):[0-9]+/.*`) can
+use any port without re-registering.
 
 ### C. Manual-paste fallback (when loopback isn't reachable)
 
@@ -725,6 +795,14 @@ reopen a closed question.
   scope mapping; on EntraID it's the API "Application ID URI"; on Keycloak
   it's a client-scope audience mapper. See **Setting the `aud` claim** above
   for the Authentik recipe; other IdPs need the equivalent in their UI.
+- **Authentik shows "Redirect URI Error — The request fails due to a missing,
+  invalid, or mismatching redirection URI (redirect_uri)"** — the redirect URI
+  the client sent is not registered on the `shared-memory-mcp` provider. From a
+  claude.ai custom connector the missing entry is
+  `https://claude.ai/api/mcp/auth_callback`; from the CLI it's the loopback URI
+  for your `--callback-port`, and a portless `http://localhost/callback` entry
+  will not match it. Authentik has no Dynamic Client Registration, so no client
+  can add the URI itself — see **Which redirect URIs to register** above.
 - **Auth.js callback fails with `OAUTH_CALLBACK_ERROR`** — your `PUBLIC_URL`
   doesn't match the redirect URI your IdP is configured with. They must be
   exactly equal, scheme and trailing slash included.

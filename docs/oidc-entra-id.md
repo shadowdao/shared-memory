@@ -231,13 +231,17 @@ https://memory.example.com/auth/cli-callback
 The first covers the loopback listener from README → *B. OAuth flow*; the
 second is the manual-paste fallback from *C*. "Mobile and desktop
 applications" permits arbitrary `https://` URIs alongside the loopback one, so
-both live on the same platform.
+both live on the same platform. If the server will also be added as a claude.ai
+custom connector, that flow is brokered by claude.ai and comes back to
+`https://claude.ai/api/mcp/auth_callback` — register it here too, or the
+connector stops at the IdP's redirect-URI mismatch error before any login
+prompt. See README → *Which redirect URIs to register*.
 
 **Note the missing port.** Entra ignores the port component when matching
 `http://localhost` redirect URIs, so the single registration
 `http://localhost/callback` matches `http://localhost:33418/callback`,
 `http://localhost:9999/callback`, and any other port. This is Entra's
-equivalent of the Authentik regex (`^http://(127\.0\.0\.1|localhost):\d+/.*$`)
+equivalent of the Authentik regex (`http://(localhost|127\.0\.0\.1):[0-9]+/.*`)
 the README mentions — users can pick any `--callback-port` without
 re-registering.
 
